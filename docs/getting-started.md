@@ -21,23 +21,36 @@ Verify it starts:
 uv run rhino-gh-mcp --help
 ```
 
-## 2. Install the Grasshopper plugin (v0)
+## 2. Install the Grasshopper plugin
 
-Until the v1 plugin lands in `plugins/grasshopper/`, build the v0 source from
-the archive:
+Build from `plugins/grasshopper/` — requires the .NET 7+ SDK
+(`brew install dotnet` on Mac).
 
 ```bash
-cd "../_archive project/rhino_gh_mcp-main/rhino_gh_mcp"
+cd ../plugins/grasshopper
 dotnet build -c Release
 ```
 
-Copy the produced `.gha` to:
+This produces:
+
+- `bin/Release/net7.0/RhinoGhMcp.gha` — use on **Mac**
+- `bin/Release/net7.0-windows/RhinoGhMcp.gha` — use on **Windows**
+
+Copy the right one to:
+
 - **Mac**: `~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper/Libraries/`
 - **Windows**: `%APPDATA%\Grasshopper\Libraries\`
+
+On Mac, then right-click the copied `.gha` in Finder → **Get Info** → **Open
+anyway** so Gatekeeper allows it. On Windows, right-click → **Properties** →
+**Unblock**.
 
 Restart Rhino, open Grasshopper. You'll find a new tab **MCP** with a single
 **MCP Server** component. Drop it on the canvas, set `Run = True`. It should
 report `Listening on 127.0.0.1:9999`.
+
+See [`plugins/grasshopper/README.md`](../plugins/grasshopper/README.md) for
+full details.
 
 ## 3. Configure your MCP client
 

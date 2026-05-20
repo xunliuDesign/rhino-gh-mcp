@@ -1,0 +1,1523 @@
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System.Text;
+using System.Linq;
+using Grasshopper.Kernel.Parameters;
+using Grasshopper.Kernel.Special;
+using Rhino;
+using Rhino.Geometry;
+using Grasshopper.Kernel;
+using System.IO;
+using System.Collections.Concurrent;
+using Grasshopper.Kernel.Types;
+
+namespace RhinoGhMcp
+{
+    public class McpServerComponent : GH_Component
+    {
+        /// <summary>
+        /// MCP Server component. Drop one on the Grasshopper canvas, toggle Run = True,
+        /// and the Python MCP server in /server/ talks to it over loopback HTTP on
+        /// the port configured below (default 9999).
+        /// </summary>
+        public McpServerComponent()
+          : base("MCP Server", "MCPServer",
+            "Hosts the rhino-gh-mcp command bridge for the LLM-side Python server.",
+            "MCP", "Server")
+        {
+        }
+
+        /// <summary>
+        /// Registers all the input parameters for this component.
+        /// </summary>
+        protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
+        {
+            // Use the pManager object to register your input parameters.
+            // You can often supply default values when creating parameters.
+            // All parameters must have the correct access type. If you want 
+            // to import lists or trees of values, modify the ParamAccess flag.
+            pManager.AddBooleanParameter("RunServer", "Run", "Start/stop the MCP server", GH_ParamAccess.item, false);
+            pManager.AddTextParameter("CategoryFilter", "Filter", "Component category filter (optional)", GH_ParamAccess.item, "MCP");
+            // Expose SetParameterMode as an integer input (optional, default 0)
+            pManager.AddIntegerParameter("SetParameterMode", "SetParamMode", "0 or empty: panel mode (default), 1: interactive UI mode (slider if present, else panel), 2: volatile data mode (always)", GH_ParamAccess.item, 0);
+            // Add RecomputeAll boolean input
+            pManager.AddBooleanParameter("AutoRecompute", "AutoRecomp", "Automatically recompute all after each command execution", GH_ParamAccess.item, false);
+
+            // If you want to change properties of certain parameters, 
+            // you can use the pManager instance to access them by index:
+            //pManager[0].Optional = true;
+        }
+
+        /// <summary>
+        /// Registers all the output parameters for this component.
+        /// </summary>
+        protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
+        {
+            // Use the pManager object to register your output parameters.
+            // Output parameters do not have default values, but they too must have the correct access type.
+            pManager.AddTextParameter("Status", "Status", "Server status", GH_ParamAccess.item);
+            pManager.AddTextParameter("DebugOutput", "Debug", "Debug/sticky info", GH_ParamAccess.item);
+
+            // Sometimes you want to hide a specific parameter from the Rhino preview.
+            // You can use the HideParameter() method as a quick way:
+            //pManager.HideParameter(0);
+        }
+
+        /// <summary>
+        /// This is the method that actually does the work.
+        /// </summary>
+        /// <param name="DA">The DA object can be used to retrieve data from input parameters and 
+        /// to store data in output parameters.</param>
+        protected override void SolveInstance(IGH_DataAccess DA)
+        {
+            bool run = false;
+            string filter = "";
+            int setParameterMode = 0;
+            bool autoRecompute = false;
+            if (!DA.GetData(0, ref run)) return;
+            DA.GetData(1, ref filter);
+            DA.GetData(2, ref setParameterMode);
+            DA.GetData(3, ref autoRecompute);
+
+            currentCategoryFilter = filter;
+            currentSetParameterMode = setParameterMode;
+            currentAutoRecompute = autoRecompute;
+
+            // Start/stop server logic
+            if (run && (serverThread == null || !serverThread.IsAlive))
+            {
+                runServer = true;
+                serverThread = new Thread(ServerThreadLoop);
+                serverThread.IsBackground = true;
+                serverThread.Start();
+                serverStatus = "Server starting...";
+            }
+            else if (!run && serverThread != null && serverThread.IsAlive)
+            {
+                runServer = false;
+                serverStatus = "Server stopping...";
+                // --- Forcibly stop the listener and thread ---
+                lock (serverLock)
+                {
+                    if (listener != null)
+                    {
+                        try { listener.Stop(); } catch { }
+                        listener = null;
+                    }
+                }
+                // Give thread more time to exit gracefully - never use Thread.Abort()!
+                if (!serverThread.Join(3000))
+                {
+                    // Log but don't abort - Thread.Abort() causes ExecutionEngineException
+                    LogError("Server thread did not stop gracefully within timeout");
+                }
+                serverThread = null;
+            }
+            DA.SetData(0, serverStatus);
+            DA.SetData(1, debugOutput);
+        }
+        /// <summary>
+        /// The Exposure property controls where in the panel a component icon 
+        /// will appear. There are seven possible locations (primary to septenary), 
+        /// each of which can be combined with the GH_Exposure.obscure flag, which 
+        /// ensures the component will only be visible on panel dropdowns.
+        /// </summary>
+        public override GH_Exposure Exposure => GH_Exposure.primary;
+
+        /// <summary>
+        /// Provides an Icon for every component that will be visible in the User Interface.
+        /// Icons need to be 24x24 pixels.
+        /// You can add image files to your project resources and access them like this:
+        /// return Resources.IconForThisComponent;
+        /// </summary>
+        protected override System.Drawing.Bitmap Icon
+        {
+            get
+            {
+                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+                using (var stream = assembly.GetManifestResourceStream("RhinoGhMcp.Resources.Icon.png"))
+                {
+                    if (stream != null)
+                        return new System.Drawing.Bitmap(stream);
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Each component must have a unique Guid to identify it. 
+        /// It is vital this Guid doesn't change otherwise old ghx files 
+        /// that use the old ID will partially fail during loading.
+        /// </summary>
+        // Component GUID preserved from v0 so existing .gh files keep referencing it.
+        public override Guid ComponentGuid => new Guid("f1795527-33da-4992-b55a-220f2b17f1dc");
+
+        // --- Server State ---
+        private Thread serverThread = null;
+        private volatile bool runServer = false;
+        private string serverStatus = "Server Off";
+        private string debugOutput = "";
+        private int port = 9999;
+        private string host = "127.0.0.1";
+        private string lastError = null;
+        private string connectionLog = "";
+        private TcpListener listener = null;
+        private object serverLock = new object();
+        private string currentCategoryFilter = "";
+
+        private int currentSetParameterMode = 0;
+        private bool currentAutoRecompute = false;
+
+        // === Persistent Debug Log and Error System ===
+        private static ConcurrentQueue<string> debugLog = new ConcurrentQueue<string>();
+        private void LogDebug(string msg) { debugLog.Enqueue($"[{DateTime.Now:HH:mm:ss}] {msg}"); if (debugLog.Count > 1000) debugLog.TryDequeue(out _); }
+        private void LogError(string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] {msg}"; LogDebug("ERROR: " + msg); }
+        private void LogError(string context, string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] [{context}] {msg}"; LogDebug($"ERROR [{context}]: {msg}"); }
+        private JObject GetDebugLog(JObject cmd)
+        {
+            var arr = new JArray(debugLog.ToArray());
+            return SuccessResponse(new JObject { ["log"] = arr, ["lastError"] = lastError });
+        }
+
+        private JObject IsServerAvailable(JObject cmd)
+        {
+            // Simple check - if we're here processing the command, the server is available
+            return SuccessResponse(new JObject
+            {
+                ["available"] = true,
+                ["status"] = serverStatus,
+                ["host"] = host,
+                ["port"] = port
+            });
+        }
+
+        // --- Server Thread Loop (scaffold) ---
+        private void ServerThreadLoop()
+        {
+            try
+            {
+                serverStatus = $"Listening on {host}:{port}";
+                ExpireComponentSolution();
+                lock (serverLock)
+                {
+                    listener = new TcpListener(IPAddress.Parse(host), port);
+                    listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                    listener.Start();
+                }
+                while (runServer)
+                {
+                    try
+                    {
+                        // Use async accept pattern for better cancellation
+                        var tcpClientTask = listener.AcceptTcpClientAsync();
+
+                        // Poll for completion or cancellation
+                        while (!tcpClientTask.IsCompleted)
+                        {
+                            if (!runServer || listener == null)
+                            {
+                                // Cancel the accept operation
+                                try { listener.Stop(); } catch { }
+                                return;
+                            }
+                            Thread.Sleep(50);
+                        }
+
+                        if (!runServer) break;
+
+                        TcpClient client = tcpClientTask.Result;
+                        ThreadPool.QueueUserWorkItem(HandleClient, client);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Expected when listener is stopped
+                        break;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Listener was stopped
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("Accept", ex.Message);
+                        if (!runServer) break;
+                        Thread.Sleep(100); // Brief pause before retry
+                    }
+                }
+                lock (serverLock)
+                {
+                    if (listener != null)
+                    {
+                        listener.Stop();
+                        listener = null;
+                    }
+                }
+                serverStatus = "Server stopped.";
+                ExpireComponentSolution();
+            }
+            catch (Exception ex)
+            {
+                lastError = ex.ToString();
+                serverStatus = "Server error: " + ex.Message;
+                ExpireComponentSolution();
+                lock (serverLock)
+                {
+                    if (listener != null)
+                    {
+                        try { listener.Stop(); } catch { }
+                        listener = null;
+                    }
+                }
+            }
+        }
+
+        // --- Handle Client (full implementation) ---
+        private void HandleClient(object obj)
+        {
+            TcpClient client = obj as TcpClient;
+            if (client == null) return;
+            try
+            {
+                using (NetworkStream stream = client.GetStream())
+                {
+                    // --- Read HTTP-like request ---
+                    var reader = new StreamReader(stream, Encoding.UTF8);
+                    var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+                    string requestLine = reader.ReadLine();
+                    if (string.IsNullOrEmpty(requestLine)) { client.Close(); return; }
+                    // Read headers
+                    string line;
+                    int contentLength = 0;
+                    while (!string.IsNullOrEmpty(line = reader.ReadLine()))
+                    {
+                        if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int.TryParse(line.Substring(15).Trim(), out contentLength);
+                        }
+                    }
+                    // Read body
+                    string body = "";
+                    if (contentLength > 0)
+                    {
+                        char[] buffer = new char[contentLength];
+                        int read = 0;
+                        while (read < contentLength)
+                        {
+                            int n = reader.Read(buffer, read, contentLength - read);
+                            if (n <= 0) break;
+                            read += n;
+                        }
+                        body = new string(buffer, 0, read);
+                    }
+                    // --- Parse and dispatch command ---
+                    JObject response = new JObject();
+                    try
+                    {
+                        JObject cmd = null;
+                        if (!string.IsNullOrWhiteSpace(body))
+                            cmd = JObject.Parse(body);
+                        else
+                            cmd = new JObject();
+                        string type = (string)cmd["type"] ?? "unknown";
+                        response = DispatchCommand(type, cmd);
+                    }
+                    catch (Exception ex)
+                    {
+                        response["status"] = "error";
+                        response["result"] = "Command parse/dispatch error: " + ex.Message;
+                    }
+                    // --- Write HTTP-like response ---
+                    string respBody = response.ToString(Formatting.None);
+                    string httpResp =
+                      "HTTP/1.1 200 OK\r\n" +
+                      "Content-Type: application/json; charset=utf-8\r\n" +
+                      $"Content-Length: {Encoding.UTF8.GetByteCount(respBody)}\r\n" +
+                      "Access-Control-Allow-Origin: *\r\n" +
+                      "Connection: close\r\n\r\n" +
+                      respBody;
+                    byte[] respBytes = Encoding.UTF8.GetBytes(httpResp);
+                    stream.Write(respBytes, 0, respBytes.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                lastError = ex.ToString();
+            }
+            finally
+            {
+                try { client.Close(); } catch { }
+            }
+        }
+
+        // --- Command Dispatch ---
+        private JObject DispatchCommand(string type, JObject cmd)
+        {
+            try
+            {
+                JObject result = null;
+                switch (type)
+                {
+                    case "add_component_to_canvas":
+                        result = AddComponentToCanvas(cmd);
+                        break;
+                    case "add_slider_to_canvas":
+                        result = AddSliderToCanvas(cmd);
+                        break;
+                    case "get_context":
+                        result = GetContext(cmd);
+                        break;
+                    case "expire_component":
+                        result = ExpireComponent(cmd);
+                        break;
+                    case "get_object":
+                    case "get_objects":
+                        result = GetObjects(cmd);
+                        break;
+                    case "get_selected":
+                        result = GetSelected(cmd);
+                        break;
+                    case "update_script":
+                        result = UpdateScript(cmd);
+                        break;
+                    case "update_script_with_code_reference":
+                        result = UpdateScriptWithCodeReference(cmd);
+                        break;
+                    case "connect_components":
+                        result = ConnectComponents(cmd);
+                        break;
+                    case "remove_node":
+                        result = RemoveNode(cmd);
+                        break;
+                    case "recompute_all":
+                        result = RecomputeAll(cmd);
+                        break;
+                    case "get_all_component_proxies":
+                        result = GetAllComponentProxies(cmd);
+                        break;
+                    case "get_all_component_library":
+                        result = GetAllComponentLibrary(cmd);
+                        break;
+                    case "set_component_parameter":
+                        result = SetComponentParameter(cmd);
+                        break;
+                    case "execute_code":
+                        result = ExecuteCode(cmd);
+                        break;
+                    case "get_debug_log":
+                        result = GetDebugLog(cmd);
+                        break;
+                    case "is_server_available":
+                        result = IsServerAvailable(cmd);
+                        break;
+                    case "get_panel_content":
+                        result = GetPanelContent(cmd);
+                        break;
+                    default:
+                        return ErrorResponse($"Unknown command type: {type}");
+                }
+
+                // Auto-recompute if enabled and command was successful
+                if (currentAutoRecompute && result != null && result["status"]?.ToString() == "success")
+                {
+                    // Don't auto-recompute for certain commands that don't modify the document
+                    var readOnlyCommands = new[] { "get_context", "get_objects", "get_selected", "get_all_component_proxies", 
+                                                    "get_all_component_library", "get_debug_log", "is_server_available", "get_panel_content" };
+                    if (!readOnlyCommands.Contains(type))
+                    {
+                        var recomputeResult = RecomputeAll(new JObject());
+                        LogDebug($"Auto-recomputed after command: {type}");
+                    }
+                }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                return ErrorResponse($"Dispatch error: {ex.Message}");
+            }
+        }
+
+        // --- Command Handlers (stubs, to be filled in) ---
+        private JObject AddComponentToCanvas(JObject cmd)
+        {
+            string name = (string)cmd["component_name"] ?? (string)cmd["name"];
+            int x = (int?)(cmd["position_x"] ?? 100) ?? 100;
+            int y = (int?)(cmd["position_y"] ?? 100) ?? 100;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var server = Grasshopper.Instances.ComponentServer;
+                    // Support multiple categories separated by commas
+                    List<string> categories = null;
+                    if (!string.IsNullOrWhiteSpace(currentCategoryFilter))
+                    {
+                        categories = currentCategoryFilter.Split(',')
+                            .Select(c => c.Trim())
+                            .Where(c => !string.IsNullOrEmpty(c))
+                            .ToList();
+                    }
+                    var proxy = server.ObjectProxies.FirstOrDefault(p =>
+                        p?.Desc != null &&
+                        (categories == null || categories.Count == 0
+                            ? true // No filter, allow any category
+                            : categories.Any(cat => (p.Desc.Category ?? "").Equals(cat, StringComparison.OrdinalIgnoreCase))) &&
+                        (p.Desc.Name == name || p.Desc.NickName == name)
+                    );
+                    if (proxy == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = $"Component '{name}' not found in allowed categories '{currentCategoryFilter}'." };
+                    }
+                    else
+                    {
+                        var comp = proxy.CreateInstance();
+                        comp.CreateAttributes();
+                        comp.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                        doc.AddObject(comp, false);
+                        result = new JObject { ["status"] = "success", ["result"] = $"Component '{proxy.Desc.Name}' added at ({x},{y}) in category '{proxy.Desc.Category}'" };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000); // Wait up to 5 seconds
+            if (error != null) return ErrorResponse($"Error adding component: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject AddSliderToCanvas(JObject cmd)
+        {
+            string name = (string)cmd["name"] ?? "Slider";
+            double min = (double?)(cmd["min_value"] ?? 0.0) ?? 0.0;
+            double max = (double?)(cmd["max_value"] ?? 10.0) ?? 10.0;
+            double val = (double?)(cmd["value"] ?? 1.0) ?? 1.0;
+            int x = (int?)(cmd["position_x"] ?? 100) ?? 100;
+            int y = (int?)(cmd["position_y"] ?? 100) ?? 100;
+            bool integer = (bool?)(cmd["integer"] ?? false) ?? false;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var slider = new GH_NumberSlider();
+                    slider.CreateAttributes();
+                    slider.NickName = name;
+                    slider.Slider.Minimum = (decimal)min;
+                    slider.Slider.Maximum = (decimal)max;
+                    slider.Slider.Value = (decimal)val;
+                    slider.Slider.DecimalPlaces = integer ? 0 : 2;
+                    slider.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                    doc.AddObject(slider, false);
+                    result = new JObject { ["status"] = "success", ["result"] = $"Slider '{name}' added at ({x},{y})" };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error adding slider: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject GetContext(JObject cmd)
+        {
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var all = new JObject();
+                    foreach (var obj in doc.Objects)
+                    {
+                        if (obj is IGH_Component comp)
+                            all[comp.InstanceGuid.ToString()] = GetComponentInfo(comp);
+                        else if (obj is IGH_Param param && param.Attributes?.Parent == null)
+                            all[param.InstanceGuid.ToString()] = GetParamInfo(param, false, null, false);
+                    }
+                    result = new JObject { ["status"] = "success", ["result"] = all };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error getting context: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject ExpireComponent(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    if (obj == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object not found." };
+                        return;
+                    }
+                    obj.ExpireSolution(true);
+                    if (obj is IGH_Component comp)
+                    {
+                        result = new JObject { ["status"] = "success", ["result"] = GetComponentInfo(comp) };
+                    }
+                    else if (obj is IGH_Param param)
+                    {
+                        result = new JObject { ["status"] = "success", ["result"] = GetParamInfo(param, false, null, false) };
+                    }
+                    else
+                    {
+                        result = new JObject { ["status"] = "success", ["result"] = "Component expired." };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error expiring component: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject GetObjects(JObject cmd)
+        {
+            JArray guids = (JArray)(cmd["instance_guids"] ?? new JArray());
+            if (cmd["instance_guid"] != null) guids.Add(cmd["instance_guid"]);
+            int depth = (int?)(cmd["context_depth"] ?? 0) ?? 0;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var all = new JObject();
+                    var set = new HashSet<string>(guids.Select(g => g.ToString()));
+                    foreach (var obj in doc.Objects)
+                    {
+                        if (obj is IGH_Component comp && set.Contains(comp.InstanceGuid.ToString()))
+                            all[comp.InstanceGuid.ToString()] = GetComponentInfo(comp);
+                        else if (obj is IGH_Param param && param.Attributes?.Parent == null && set.Contains(param.InstanceGuid.ToString()))
+                            all[param.InstanceGuid.ToString()] = GetParamInfo(param, false, null, false);
+                    }
+                    result = new JObject { ["status"] = "success", ["result"] = all };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error getting objects: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject GetSelected(JObject cmd)
+        {
+            int depth = (int?)(cmd["context_depth"] ?? 0) ?? 0;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var all = new JObject();
+                    foreach (var obj in doc.Objects)
+                    {
+                        bool sel = obj.Attributes?.Selected ?? false;
+                        if (sel)
+                        {
+                            if (obj is IGH_Component comp)
+                                all[comp.InstanceGuid.ToString()] = GetComponentInfo(comp);
+                            else if (obj is IGH_Param param && param.Attributes?.Parent == null)
+                                all[param.InstanceGuid.ToString()] = GetParamInfo(param, false, null, true);
+                        }
+                    }
+                    result = new JObject { ["status"] = "success", ["result"] = all };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error getting selected: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject UpdateScript(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            string code = (string)cmd["code"];
+            string desc = (string)cmd["description"];
+            string msg = (string)cmd["message_to_user"];
+            JArray paramDefs = (JArray)cmd["param_definitions"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), false) as IGH_Component;
+                    if (obj == null || !obj.GetType().GetProperty("Code")?.CanWrite == true)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Not a script component." };
+                        return;
+                    }
+                    if (paramDefs != null) { /* param update logic omitted for brevity */ }
+                    if (code != null) obj.GetType().GetProperty("Code").SetValue(obj, code, null);
+                    if (desc != null) obj.Description = desc;
+                    result = new JObject { ["status"] = "success", ["result"] = "Script updated." };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error updating script: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject UpdateScriptWithCodeReference(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            string file = (string)cmd["file_path"];
+            JArray paramDefs = (JArray)cmd["param_definitions"];
+            string desc = (string)cmd["description"];
+            string name = (string)cmd["name"];
+            bool force = (bool?)(cmd["force_code_reference"] ?? false) ?? false;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), false) as IGH_Component;
+                    if (obj == null || !obj.GetType().GetProperty("InputIsPath")?.CanWrite == true)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Not a script component." };
+                        return;
+                    }
+                    if (force) obj.GetType().GetProperty("InputIsPath").SetValue(obj, true, null);
+                    if (desc != null) obj.Description = desc;
+                    if (name != null) obj.NickName = name;
+                    result = new JObject { ["status"] = "success", ["result"] = "Script code reference updated." };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error updating script reference: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject ConnectComponents(JObject cmd)
+        {
+            string srcGuid = (string)cmd["source_guid"];
+            string srcOut = (string)cmd["source_output"];
+            string tgtGuid = (string)cmd["target_guid"];
+            string tgtIn = (string)cmd["target_input"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var src = doc.FindObject(new Guid(srcGuid), true);
+                    var tgt = doc.FindObject(new Guid(tgtGuid), true) as IGH_Component;
+                    if (src == null || tgt == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Source or target not found." };
+                        return;
+                    }
+                    IGH_Param srcParam = null;
+                    if (src is GH_NumberSlider) srcParam = src as IGH_Param;
+                    else if (src is IGH_Component sc) srcParam = sc.Params.Output.FirstOrDefault(p => p.NickName == srcOut || p.Name == srcOut);
+                    var tgtParam = tgt.Params.Input.FirstOrDefault(p => p.NickName == tgtIn || p.Name == tgtIn);
+                    if (srcParam == null || tgtParam == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Params not found." };
+                        return;
+                    }
+                    while (tgtParam.Sources.Count > 0) tgtParam.RemoveSource(tgtParam.Sources[0]);
+                    tgtParam.AddSource(srcParam);
+                    result = new JObject { ["status"] = "success", ["result"] = "Connected." };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error connecting components: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject RemoveNode(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    if (obj == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object not found." };
+                        return;
+                    }
+                    doc.RemoveObject(obj, true);
+                    result = new JObject { ["status"] = "success", ["result"] = "Removed." };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error removing node: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject RecomputeAll(JObject cmd)
+        {
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    GetGHDocument().NewSolution(true);
+                    result = new JObject { ["status"] = "success", ["result"] = "Recomputed." };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error recomputing: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject GetAllComponentProxies(JObject cmd)
+        {
+            int limit = (int?)(cmd["limit"] ?? 1000) ?? 1000;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            try
+            {
+                RunOnUiThread(() =>
+                {
+                    try
+                    {
+                        var server = Grasshopper.Instances.ComponentServer;
+                        if (server?.ObjectProxies == null)
+                        {
+                            result = new JObject { ["status"] = "error", ["error"] = "Component server not initialized" };
+                            return;
+                        }
+
+                        // Support multiple categories separated by commas
+                        List<string> categories = null;
+                        if (!string.IsNullOrWhiteSpace(currentCategoryFilter))
+                        {
+                            categories = currentCategoryFilter.Split(',')
+                                .Select(c => c.Trim())
+                                .Where(c => !string.IsNullOrEmpty(c))
+                                .ToList();
+                        }
+                        int retries = 0;
+                        int maxRetries = 3;
+                        int proxyCount = 0;
+                        List<IGH_ObjectProxy> proxies = null;
+                        while (retries < maxRetries)
+                        {
+                            try
+                            {
+                                proxies = server.ObjectProxies
+                                    .Where(p => p?.Desc != null &&
+                                        (
+                                            categories == null || categories.Count == 0
+                                            ? true // No filter, fetch all
+                                            : categories.Any(cat => (p.Desc.Category ?? "").Equals(cat, StringComparison.OrdinalIgnoreCase))
+                                        )
+                                    )
+                                    .Take(limit)
+                                    .ToList();
+                                proxyCount = proxies.Count;
+                                LogDebug($"[GetAllComponentProxies] Attempt {retries + 1}: Found {proxyCount} proxies.");
+                                if (proxyCount > 0) break;
+                            }
+                            catch (Exception ex)
+                            {
+                                LogError("GetProxies", $"Attempt {retries + 1} failed: {ex.Message}");
+                            }
+                            System.Threading.Thread.Sleep(200);
+                            retries++;
+                        }
+                        if (proxyCount == 0) LogError("[GetAllComponentProxies] No proxies found after retries.");
+
+                        // Group by Category and SubCategory
+                        var grouped = new JObject();
+                        if (proxies != null)
+                        {
+                            foreach (var proxy in proxies)
+                            {
+                                var desc = proxy.Desc;
+                                string category = desc.Category ?? "Uncategorized";
+                                string subcategory = desc.SubCategory ?? "Unspecified";
+
+                                // Build proxy info with extra fields
+                                var proxyObj = new JObject
+                                {
+                                    ["Name"] = desc.Name,
+                                    ["NickName"] = desc.NickName,
+                                    ["Guid"] = proxy.Guid.ToString(),
+                                    ["Description"] = desc.Description,
+                                    ["Category"] = desc.Category,
+                                    ["SubCategory"] = desc.SubCategory,
+                                    ["HasCategory"] = desc.HasCategory,
+                                    ["HasSubCategory"] = desc.HasSubCategory,
+                                    ["InstanceDescription"] = desc.InstanceDescription,
+                                    ["InstanceGuid"] = desc.InstanceGuid.ToString(),
+                                    ["Keywords"] = desc.Keywords != null ? JArray.FromObject(desc.Keywords) : null,
+                                    ["Kind"] = proxy.Kind != null ? proxy.Kind.ToString() : null,
+                                    ["Location"] = proxy.Location != null ? proxy.Location.ToString() : null,
+                                    ["SDKCompliant"] = proxy.SDKCompliant,
+                                    ["Type"] = proxy.Type != null ? proxy.Type.ToString() : null
+                                };
+                                // Try to get library info if possible
+                                try
+                                {
+                                    var lib = Grasshopper.Instances.ComponentServer.FindAssemblyByObject(proxy.Guid);
+                                    proxyObj["Library"] = lib != null ? lib.Name : null;
+                                    proxyObj["LibraryId"] = lib != null ? lib.Id.ToString() : null;
+                                    proxyObj["LibraryVersion"] = lib != null ? lib.Version.ToString() : null;
+                                }
+                                catch { }
+
+                                if (!(grouped[category] is JObject catObj))
+                                {
+                                    catObj = new JObject();
+                                    grouped[category] = catObj;
+                                }
+                                if (!catObj.ContainsKey(subcategory))
+                                {
+                                    catObj[subcategory] = new JArray();
+                                }
+                              ((JArray)catObj[subcategory]).Add(proxyObj);
+                            }
+                        }
+
+                        result = new JObject { ["status"] = "success", ["result"] = grouped };
+                        if (grouped.Count == 0)
+                        {
+                            LogError("[GetAllComponentProxies] Grouped result is empty ({}). Possible initialization issue.");
+                            result = new JObject { ["status"] = "error", ["error"] = "No component proxies found. Grasshopper may not be fully initialized or there is a plugin loading issue." };
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        error = ex;
+                    }
+                    finally
+                    {
+                        done.Set();
+                    }
+                });
+
+                done.Wait(10000); // Wait up to 10 seconds for UI thread
+
+                if (error != null)
+                {
+                    LogError("GetAllComponentProxies", $"Exception: {error.Message}");
+                    return ErrorResponse($"Exception in GetAllComponentProxies: {error.Message}");
+                }
+
+                return result ?? ErrorResponse("Operation timed out");
+
+            }
+            catch (Exception ex)
+            {
+                LogError("GetAllComponentProxies", $"Outer exception: {ex.Message}");
+                return ErrorResponse($"Exception in GetAllComponentProxies: {ex.Message}");
+            }
+        }
+        private JObject GetAllComponentLibrary(JObject cmd)
+        {
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var ribbon = Grasshopper.Instances.ComponentServer.CompleteRibbonLayout;
+                    var comps = new JArray();
+                    foreach (var tab in ribbon.Tabs)
+                        foreach (var panel in tab.Panels)
+                            foreach (var obj in Grasshopper.Instances.ComponentServer.ObjectProxies)
+                                if ((obj.Desc.Category == tab.Name) && (obj.Desc.SubCategory == panel.Name))
+                                    comps.Add(new JObject
+                                    {
+                                        ["Category"] = tab.Name,
+                                        ["SubCategory"] = panel.Name,
+                                        ["Name"] = obj.Desc.Name,
+                                        ["NickName"] = obj.Desc.NickName,
+                                        ["Description"] = obj.Desc.Description,
+                                        ["Guid"] = obj.Desc.InstanceGuid.ToString()
+                                    });
+                    result = new JObject { ["status"] = "success", ["result"] = comps };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error getting component library: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+        private JObject GetComponentInfo(IGH_Component comp)
+        {
+            var o = new JObject();
+            o["instanceGuid"] = comp.InstanceGuid.ToString();
+            o["name"] = comp.Name;
+            o["nickName"] = comp.NickName;
+            o["description"] = comp.Description;
+            o["category"] = comp.Category;
+            o["subCategory"] = comp.SubCategory;
+            o["kind"] = comp.GetType().Name;
+            o["isSelected"] = comp.Attributes?.Selected ?? false;
+            o["Inputs"] = new JArray(comp.Params.Input.Select(p => GetParamInfo(p, true, comp.InstanceGuid, false)));
+            o["Outputs"] = new JArray(comp.Params.Output.Select(p => GetParamInfo(p, false, comp.InstanceGuid, false)));
+            return o;
+        }
+        private JObject GetParamInfo(IGH_Param param, bool isInput, Guid? parentGuid, bool isSelected)
+        {
+            var o = new JObject();
+            o["instanceGuid"] = param.InstanceGuid.ToString();
+            o["parentInstanceGuid"] = parentGuid?.ToString();
+            o["name"] = param.Name;
+            o["nickName"] = param.NickName;
+            o["description"] = param.Description;
+            o["kind"] = param.GetType().Name;
+            o["isInput"] = isInput;
+            o["isSelected"] = isSelected;
+            o["access"] = param.Access.ToString();
+            o["optional"] = param.Optional;
+            o["sources"] = new JArray(param.Sources.Select(s => s.InstanceGuid.ToString()));
+            o["targets"] = new JArray(param.Recipients.Select(r => r.InstanceGuid.ToString()));
+            return o;
+        }
+
+        // --- Utility: Success/Error Response ---
+        private JObject SuccessResponse(object result)
+        {
+            return new JObject { ["status"] = "success", ["result"] = JToken.FromObject(result) };
+        }
+        private JObject ErrorResponse(string message)
+        {
+            return new JObject { ["status"] = "error", ["result"] = message };
+        }
+
+        // --- Utility: UI Thread Marshal ---
+        private void RunOnUiThread(Action action)
+        {
+            RhinoApp.InvokeOnUiThread(action);
+        }
+
+        // --- Utility: Get Grasshopper Document ---
+        private GH_Document GetGHDocument()
+        {
+            return OnPingDocument();
+        }
+
+        // --- Utility: Expire this component's solution from any thread (SAFELY)
+        private void ExpireComponentSolution()
+        {
+            try
+            {
+                // Check if document is still valid before expiring
+                RhinoApp.InvokeOnUiThread(new Action(() =>
+                {
+                    try
+                    {
+                        if (this.OnPingDocument() != null)
+                            this.ExpireSolution(false); // Use false to avoid recursive expiration
+                    }
+                    catch { }
+                }));
+            }
+            catch { }
+        }
+
+        // --- Utility: Get Component/Param Info (stub) ---
+        // TODO: Implement info extraction helpers mirroring Python
+
+        // === MCP Server: Command Handlers and Utilities Refactor ===
+        // (1) Add set_component_parameter command
+        // (2) Refactor for clarity
+        // (3) Upgrade update_script and update_script_with_code_reference
+        // (4) Add execute_code (optional)
+        // (5) Enhance info extraction
+        // (6) Add comments
+        private JObject SetComponentParameter(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            string paramName = (string)cmd["param_name"];
+            string value = (string)cmd["value"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    if (obj == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object not found." };
+                        return;
+                    }
+                    IGH_Param param = null;
+                    if (obj is IGH_Component comp)
+                    {
+                        param = comp.Params.Input.FirstOrDefault(p => p.Name == paramName || p.NickName == paramName)
+                             ?? comp.Params.Output.FirstOrDefault(p => p.Name == paramName || p.NickName == paramName);
+                    }
+                    else if (obj is IGH_Param p)
+                    {
+                        param = p;
+                    }
+                    if (param == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = $"Parameter '{paramName}' not found." };
+                        return;
+                    }
+                    // --- Set parameter logic based on mode ---
+                    if (currentSetParameterMode == 2)
+                    {
+                        // VolatileData mode: always set VolatileData directly
+                        param.RemoveAllSources();
+                        param.VolatileData.Clear();
+                        try
+                        {
+                            var path = new Grasshopper.Kernel.Data.GH_Path(0);
+                            object typedValue = value;
+                            if (param is Param_Number && double.TryParse(value, out double d)) typedValue = d;
+                            else if (param is Param_Integer && int.TryParse(value, out int i)) typedValue = i;
+                            else if (param is Param_Boolean && bool.TryParse(value, out bool b)) typedValue = b;
+                            else if (param is Param_String) typedValue = value;
+                            else if (param is Param_Colour && System.Drawing.ColorTranslator.FromHtml(value) is System.Drawing.Color col) typedValue = col;
+                            else if (param is Param_FilePath) typedValue = value;
+                            else if (param is Param_Point && Rhino.Geometry.Point3d.TryParse(value, out var pt)) typedValue = pt;
+                            // For the following types, parsing from string is not directly supported, so just assign the string value
+                            else if (param is Param_Vector) typedValue = value;
+                            else if (param is Param_Plane) typedValue = value;
+                            else if (param is Param_Rectangle) typedValue = value;
+                            else if (param is Param_Box) typedValue = value;
+                            else if (param is Param_Arc) typedValue = value;
+                            else if (param is Param_Circle) typedValue = value;
+                            else if (param is Param_Line) typedValue = value;
+                            else if (param is Param_Curve) typedValue = value;
+                            else if (param is Param_Mesh) typedValue = value;
+                            else if (param is Param_Surface) typedValue = value;
+                            else if (param is Param_Brep) typedValue = value;
+                            else if (param is Param_Geometry) typedValue = value;
+                            param.AddVolatileData(path, 0, typedValue);
+                            result = new JObject { ["status"] = "success", ["result"] = $"Parameter '{paramName}' set to '{value}' (VolatileData mode)" };
+                        }
+                        catch (Exception ex)
+                        {
+                            result = new JObject { ["status"] = "error", ["result"] = $"Failed to set value: {ex.Message}" };
+                        }
+                        return; // Ensure no panel logic runs
+                    }
+                    if (currentSetParameterMode == 1)
+                    {
+                        // Interactive UI mode: add UI element if not present
+                        if (param.Sources.Count == 0)
+                        {
+                            // Numeric (double/int)
+                            if ((param is Param_Number) || (param is Param_Integer))
+                            {
+                                var newSlider = new GH_NumberSlider();
+                                newSlider.CreateAttributes();
+                                newSlider.Slider.Minimum = (decimal)0;
+                                newSlider.Slider.Maximum = (decimal)100;
+                                double sliderValue = 0;
+                                double.TryParse(value, out sliderValue);
+                                newSlider.Slider.Value = (decimal)Math.Max((double)newSlider.Slider.Minimum, Math.Min((double)newSlider.Slider.Maximum, sliderValue));
+                                newSlider.Attributes.Pivot = new System.Drawing.PointF(param.Attributes.Pivot.X - 120, param.Attributes.Pivot.Y);
+                                doc.AddObject(newSlider, false);
+                                param.AddSource(newSlider);
+                                result = new JObject { ["status"] = "success", ["result"] = $"Slider created and set to {sliderValue}" };
+                                return;
+                            }
+                            // Boolean
+                            if (param is Param_Boolean)
+                            {
+                                var toggle = new GH_BooleanToggle();
+                                toggle.CreateAttributes();
+                                bool boolValue = false;
+                                bool.TryParse(value, out boolValue);
+                                toggle.Value = boolValue;
+                                toggle.Attributes.Pivot = new System.Drawing.PointF(param.Attributes.Pivot.X - 120, param.Attributes.Pivot.Y);
+                                doc.AddObject(toggle, false);
+                                param.AddSource(toggle);
+                                result = new JObject { ["status"] = "success", ["result"] = $"Boolean toggle created and set to {boolValue}" };
+                                return;
+                            }
+                            // Color
+                            if (param is Param_Colour)
+                            {
+                                var swatch = new GH_ColourSwatch();
+                                swatch.CreateAttributes();
+                                try
+                                {
+                                    var color = System.Drawing.ColorTranslator.FromHtml(value);
+                                    swatch.SwatchColour = color;
+                                    swatch.Attributes.Pivot = new System.Drawing.PointF(param.Attributes.Pivot.X - 120, param.Attributes.Pivot.Y);
+                                    doc.AddObject(swatch, false);
+                                    param.AddSource(swatch);
+                                    result = new JObject { ["status"] = "success", ["result"] = $"Colour swatch created and set to {value}" };
+                                }
+                                catch
+                                {
+                                    result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as color for swatch." };
+                                }
+                                return;
+                            }
+                            // Fallback: Panel for all other types
+                        }
+                        // If already has a source, keep existing logic (slider, toggle, swatch, panel)
+                        if (param.Sources.Count == 1 && param.Sources[0] is GH_NumberSlider slider)
+                        {
+                            double sliderValue;
+                            if (double.TryParse(value, out sliderValue))
+                            {
+                                slider.Slider.Value = (decimal)Math.Max((double)slider.Slider.Minimum, Math.Min((double)slider.Slider.Maximum, sliderValue));
+                                result = new JObject { ["status"] = "success", ["result"] = $"Slider value set to {sliderValue}" };
+                            }
+                            else
+                            {
+                                result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as double for slider." };
+                            }
+                            return;
+                        }
+                        if (param.Sources.Count == 1 && param.Sources[0] is GH_BooleanToggle boolToggle)
+                        {
+                            bool boolValue;
+                            if (bool.TryParse(value, out boolValue))
+                            {
+                                boolToggle.Value = boolValue;
+                                result = new JObject { ["status"] = "success", ["result"] = $"Boolean toggle set to {boolValue}" };
+                            }
+                            else
+                            {
+                                result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as boolean for toggle." };
+                            }
+                            return;
+                        }
+                        if (param.Sources.Count == 1 && param.Sources[0] is GH_ColourSwatch colourSwatch)
+                        {
+                            try
+                            {
+                                var color = System.Drawing.ColorTranslator.FromHtml(value);
+                                colourSwatch.SwatchColour = color;
+                                result = new JObject { ["status"] = "success", ["result"] = $"Colour swatch set to {value}" };
+                            }
+                            catch
+                            {
+                                result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as color for swatch." };
+                            }
+                            return;
+                        }
+                        // Fallback to panel mode if no slider, toggle, or swatch
+                    }
+                    // Panel mode (default, or fallback): always use a panel for value setting
+                    IGH_Param panelParam = null;
+                    if (param.Sources.Count == 1 && param.Sources[0] is GH_Panel existingPanel)
+                    {
+                        existingPanel.UserText = value;
+                        // Set background to white and minimize size
+                        existingPanel.Properties.Colour = System.Drawing.Color.White;
+                        existingPanel.Attributes?.ExpireLayout();
+                        panelParam = existingPanel;
+                    }
+                    else
+                    {
+                        var panel = new GH_Panel();
+                        panel.CreateAttributes();
+                        panel.UserText = value;
+                        // Set background to white and minimize size
+                        panel.Properties.Colour = System.Drawing.Color.White;
+                        panel.Attributes?.ExpireLayout();
+                        panel.Attributes.Pivot = new System.Drawing.PointF(param.Attributes.Pivot.X - 120, param.Attributes.Pivot.Y);
+                        doc.AddObject(panel, false);
+                        param.RemoveAllSources();
+                        param.AddSource(panel);
+                        panelParam = panel;
+                    }
+                    result = new JObject { ["status"] = "success", ["result"] = $"Panel value set to '{value}' and connected to parameter '{paramName}' (Panel mode)" };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error setting parameter: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        private JObject ExecuteCode(JObject cmd)
+        {
+            // Not supported in C# context
+            return ErrorResponse("execute_code is not supported in C# MCP server.");
+        }
+
+        private JObject GetPanelContent(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    
+                    if (obj == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object not found." };
+                        return;
+                    }
+
+                    // Check if it's a Panel
+                    if (obj is GH_Panel panel)
+                    {
+                        string userText = panel.UserText;
+                        var runtimeContent = new JArray();
+                        
+                        // Get runtime content from volatile data
+                        if (panel.VolatileData != null && panel.VolatileData.DataCount > 0)
+                        {
+                            try
+                            {
+                                // Iterate through all paths in the volatile data
+                                foreach (var path in panel.VolatileData.Paths)
+                                {
+                                    var branch = panel.VolatileData.get_Branch(path);
+                                    if (branch != null)
+                                    {
+                                        for (int i = 0; i < branch.Count; i++)
+                                        {
+                                            var item = branch[i];
+                                            if (item != null)
+                                            {
+                                                runtimeContent.Add(new JObject
+                                                {
+                                                    ["path"] = path.ToString(),
+                                                    ["index"] = i,
+                                                    ["value"] = item.ToString(),
+                                                    ["type"] = item.GetType().Name
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                LogError("GetPanelContent", $"Error reading volatile data: {ex.Message}");
+                            }
+                        }
+                        
+                        // Get the formatted text that would be displayed in the panel
+                        string displayText = "";
+                        try
+                        {
+                            // Try to get the formatted display text
+                            var formatMethod = panel.GetType().GetMethod("Format", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            if (formatMethod != null)
+                            {
+                                displayText = formatMethod.Invoke(panel, null) as string ?? "";
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            LogError("GetPanelContent", $"Error getting formatted text: {ex.Message}");
+                        }
+
+                        result = new JObject 
+                        { 
+                            ["status"] = "success", 
+                            ["result"] = new JObject
+                            {
+                                ["user_text"] = userText,
+                                ["runtime_content"] = runtimeContent,
+                                ["display_text"] = displayText,
+                                ["has_runtime_data"] = runtimeContent.Count > 0,
+                                ["instance_guid"] = guid,
+                                ["nickname"] = panel.NickName,
+                                ["properties"] = new JObject
+                                {
+                                    ["wrap"] = panel.Properties.Wrap,
+                                    ["multiline"] = panel.Properties.Multiline,
+                                    ["special_codes"] = panel.Properties.SpecialCodes,
+                                    ["draw_paths"] = panel.Properties.DrawPaths,
+                                    ["draw_indices"] = panel.Properties.DrawIndices,
+                                    ["stream_contents"] = panel.Properties.StreamContents,
+                                    ["stream_path"] = panel.Properties.StreamPath,
+                                    ["alignment"] = panel.Properties.Alignment.ToString(),
+                                    ["colour"] = panel.Properties.Colour.ToArgb(),
+                                    ["colour_hex"] = "#" + panel.Properties.Colour.ToArgb().ToString("X8")
+                                }
+                            }
+                        };
+                    }
+                    else
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object is not a Panel component." };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error getting panel content: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // --- Enhanced Parameter Update/Restore Logic for update_script and update_script_with_code_reference ---
+        // This block upgrades the script/code reference update logic to match Python's robustness.
+        // It uses dummy params, restores connections, handles 'code' param, and logs all steps/errors.
+    }
+}

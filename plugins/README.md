@@ -7,21 +7,29 @@ Two compiled binaries live inside Rhino at runtime:
 | `rhino_gh_mcp.gha` | Grasshopper assembly (C#) | loopback HTTP `:9999` | [./grasshopper/](./grasshopper/) |
 | `rhino_gh_mcp.rhp` | Rhino plugin (C#) | loopback TCP `:9876` | [./rhino/](./rhino/) |
 
-For v0.1.0 the **Grasshopper plugin source from `_archive project/rhino_gh_mcp-main/rhino_gh_mcp/`
-is the canonical implementation** — the v1 Python server is wire-compatible
-with it. The Rhino plugin is being rewritten clean in `./rhino/` (the v0 one
-in `_archive project/rhino_gh_mcp-main/rhino_script_client/` mixed in a
-StreamDiffusion experiment we're dropping).
+**Grasshopper plugin (v0.1.0)** — fresh build under [`./grasshopper/`](./grasshopper/).
+Targets Rhino 8 only (net7.0 + net7.0-windows). All v0 command handlers ported.
 
-## Build (v0 .gha, until v1 lands)
+**Rhino plugin** — being rewritten in [`./rhino/`](./rhino/). The v0 source in
+`_archive project/rhino_gh_mcp-main/rhino_script_client/` mixes the MCP service
+with an unrelated StreamDiffusion experiment we are dropping. P1 of the
+roadmap.
+
+## Build the Grasshopper plugin
 
 ```bash
-cd "_archive project/rhino_gh_mcp-main/rhino_gh_mcp"
+cd plugins/grasshopper
 dotnet build -c Release
-# .gha will be at bin/Release/net7.0-windows/rhino_gh_mcp.gha (Windows)
-# Drop it in: ~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper/Libraries/  (Mac)
-#         or: %APPDATA%\Grasshopper\Libraries\  (Windows)
+# Mac:     bin/Release/net7.0/RhinoGhMcp.gha
+# Windows: bin/Release/net7.0-windows/RhinoGhMcp.gha
 ```
+
+Install path:
+- **Mac**: `~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper/Libraries/`
+- **Windows**: `%APPDATA%\Grasshopper\Libraries\`
+
+Right-click the copied `.gha` and Unblock / Open-anyway on first launch, then
+restart Rhino.
 
 ## Distribution roadmap
 

@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Rhino 8 targets:
+        net7.0          - cross-platform (Mac + Windows headless)
+        net7.0-windows  - Windows-only WinForms/WPF integration
+      Rhino 7 (net48) is intentionally dropped. If you need it, fork v0 in _archive project/.
+    -->
+    <TargetFrameworks>net7.0;net7.0-windows</TargetFrameworks>
+    <RootNamespace>RhinoGhMcp</RootNamespace>
+    <AssemblyName>RhinoGhMcp</AssemblyName>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <TargetExt>.gha</TargetExt>
+    <NoWarn>NU1701;NETSDK1086</NoWarn>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Title>rhino-gh-mcp</Title>
+    <Company>Xun Liu</Company>
+    <Description>MCP server bridge for Grasshopper. Companion to the rhino-gh-mcp Python server.</Description>
+    <PackageProjectUrl>https://github.com/xunliuDesign/rhino-gh-mcp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/xunliuDesign/rhino-gh-mcp</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grasshopper" Version="8.0.23304.9001" ExcludeAssets="runtime" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <!-- Windows-targeted build: WinForms comes in via the SDK. -->
+  <PropertyGroup Condition="$(TargetFramework.Contains('-windows'))">
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+
+  <!--
+    Cross-platform build (net7.0 plain): reference the .NET 4.8 WinForms assembly
+    via a NuGet-supplied reference pack so the .gha builds on Mac without WinForms
+    being natively installed. Same pattern Rhino's stock GH plugin templates use
+    for Mac builds in the 8.10 era.
+  -->
+  <ItemGroup Condition="!$(TargetFramework.Contains('-windows'))">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" ExcludeAssets="all" GeneratePathProperty="true" />
+    <Reference Include="$(PkgMicrosoft_NETFramework_ReferenceAssemblies_net48)\build\.NETFramework\v4.8\System.Windows.Forms.dll" Private="False" />
+    <PackageReference Include="System.Drawing.Common" Version="7.0.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="src/Resources/Icon.png" LogicalName="RhinoGhMcp.Resources.Icon.png" />
+  </ItemGroup>
+
+  <!-- Mono PDB shim for Mac debugging in older Rhino builds (harmless on newer ones). -->
+  <Target Name="CopyPdbForMonoDebugging" AfterTargets="AfterBuild">
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb"
+          DestinationFiles="$(TargetDir)$(TargetName).gha.pdb"
+          Condition="$([MSBuild]::IsOSPlatform(OSX)) and Exists('$(TargetDir)$(TargetName).pdb')" />
+  </Target>
+
+</Project>

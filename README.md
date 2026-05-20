@@ -4,9 +4,9 @@
 > control over a Rhino 8 modeling session — for parametric design, architectural
 > research, and teaching.
 
-**Status:** v0.1.0 — first working skeleton. Vertical slice runs end-to-end against
-the existing Grasshopper `.gha` from `_archive project/`. Rhino plugin and Skills
-library land in the next pass.
+**Status:** v0.1.0 — Python MCP server + fresh Grasshopper `.gha` plugin
+build clean and run end-to-end. Rhino plugin (`.rhp`) and the rest of the
+Skills library land in the next pass.
 
 ## What this is
 
@@ -43,8 +43,14 @@ Pick the policy via `--policy {parameter|curated|full}` or the
 cd server
 uv sync                   # creates .venv, installs deps
 
-# 2. Launch Rhino 8, open Grasshopper, drop the MCP Server component on the
-#    canvas (from _archive project for now), set Run = True.
+# 2. Build & install the Grasshopper plugin
+cd ../plugins/grasshopper
+dotnet build -c Release
+# Mac:     cp bin/Release/net7.0/RhinoGhMcp.gha          ~/Library/Application\ Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper/Libraries/
+# Windows: copy bin\Release\net7.0-windows\RhinoGhMcp.gha %APPDATA%\Grasshopper\Libraries\
+
+# Launch Rhino 8, open Grasshopper, drop the MCP Server component on the
+# canvas (under the MCP tab), wire a Boolean Toggle = True to Run.
 
 # 3. Wire the MCP server into your client. For Claude Desktop, add to
 #    ~/Library/Application Support/Claude/claude_desktop_config.json:
@@ -88,8 +94,8 @@ rhino-gh-mcp/
 
 | Phase | Status | Scope |
 |-------|--------|-------|
-| **P0** | ✅ in this commit | Clean skeleton, FastMCP 2 server, vertical slice for `gh.recompute_all` + `gh.add_slider_to_canvas` |
-| **P1** | ⏳ | Port all 15 GH commands from archive, fix Rhino tool registration, Streamable HTTP transport |
+| **P0** | ✅ | Clean skeleton, FastMCP server, all 15 GH commands ported as Python tools, fresh `.gha` builds Mac+Windows |
+| **P1** | ⏳ | Rhino `.rhp` clean carve-out from archive, Streamable HTTP transport, viewport capture wired through |
 | **P2** | ⏳ | Policy enforcement at tool-registration time, first Skill (`landform-from-contours`) wired up |
 | **P3** | ⏳ | Rhino 8 Script-component injection (Python 3 + C#) |
 | **P4** | ⏳ | Surface expansion (sliders/panels/toggles/value-lists as first-class tools, baking, runtime messages, canvas screenshot) |
