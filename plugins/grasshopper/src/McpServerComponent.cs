@@ -453,6 +453,16 @@ namespace RhinoGhMcp
                     case "get_panel_content":
                         result = GetPanelContent(cmd);
                         break;
+                    // v0.1.1 additions ----------------------------------------
+                    case "set_slider_range":
+                        result = SetSliderRange(cmd);
+                        break;
+                    case "get_runtime_messages":
+                        result = GetRuntimeMessages(cmd);
+                        break;
+                    case "capture_canvas":
+                        result = CaptureCanvas(cmd);
+                        break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
                 }
@@ -484,6 +494,8 @@ namespace RhinoGhMcp
             string name = (string)cmd["component_name"] ?? (string)cmd["name"];
             int x = (int?)(cmd["position_x"] ?? 100) ?? 100;
             int y = (int?)(cmd["position_y"] ?? 100) ?? 100;
+            // v0.1.1: L3 escape hatch — when true, ignore CategoryFilter and place any component.
+            bool bypassFilter = (bool?)(cmd["bypass_filter"] ?? false) ?? false;
             JObject result = null;
             Exception error = null;
             var done = new System.Threading.ManualResetEventSlim(false);
@@ -496,7 +508,7 @@ namespace RhinoGhMcp
                     var server = Grasshopper.Instances.ComponentServer;
                     // Support multiple categories separated by commas
                     List<string> categories = null;
-                    if (!string.IsNullOrWhiteSpace(currentCategoryFilter))
+                    if (!bypassFilter && !string.IsNullOrWhiteSpace(currentCategoryFilter))
                     {
                         categories = currentCategoryFilter.Split(',')
                             .Select(c => c.Trim())
@@ -512,7 +524,8 @@ namespace RhinoGhMcp
                     );
                     if (proxy == null)
                     {
-                        result = new JObject { ["status"] = "error", ["result"] = $"Component '{name}' not found in allowed categories '{currentCategoryFilter}'." };
+                        string filterDesc = bypassFilter ? "(bypass=true, no filter)" : $"allowed categories '{currentCategoryFilter}'";
+                        result = new JObject { ["status"] = "error", ["result"] = $"Component '{name}' not found in {filterDesc}." };
                     }
                     else
                     {
@@ -1551,8 +1564,233 @@ namespace RhinoGhMcp
             return result ?? ErrorResponse("Operation timed out");
         }
 
-        // --- Enhanced Parameter Update/Restore Logic for update_script and update_script_with_code_reference ---
-        // This block upgrades the script/code reference update logic to match Python's robustness.
-        // It uses dummy params, restores connections, handles 'code' param, and logs all steps/errors.
+        // ================================================================
+        // v0.1.1 additions — set_slider_range, get_runtime_messages, capture_canvas
+        // ================================================================
+
+        /// <summary>
+        /// Adjust the min/max range of an existing Number Slider, clamping the
+        /// current value if necessary. The Python tool gh_set_slider_range hits this.
+        /// </summary>
+        private JObject SetSliderRange(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            double min = (double?)cmd["min_value"] ?? 0.0;
+            double max = (double?)cmd["max_value"] ?? 1.0;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(guid))
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "instance_guid is required." };
+                        return;
+                    }
+                    if (max <= min)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = $"max_value ({max}) must be greater than min_value ({min})." };
+                        return;
+                    }
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    if (!(obj is GH_NumberSlider slider))
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object is not a Number Slider." };
+                        return;
+                    }
+                    slider.Slider.Minimum = (decimal)min;
+                    slider.Slider.Maximum = (decimal)max;
+                    // Clamp current value into the new range
+                    if (slider.Slider.Value < slider.Slider.Minimum) slider.Slider.Value = slider.Slider.Minimum;
+                    if (slider.Slider.Value > slider.Slider.Maximum) slider.Slider.Value = slider.Slider.Maximum;
+                    slider.ExpireSolution(false);
+                    result = new JObject
+                    {
+                        ["status"] = "success",
+                        ["result"] = new JObject
+                        {
+                            ["instance_guid"] = guid,
+                            ["min"] = (double)slider.Slider.Minimum,
+                            ["max"] = (double)slider.Slider.Maximum,
+                            ["value"] = (double)slider.Slider.Value
+                        }
+                    };
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error setting slider range: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// First-class runtime-messages read. Returns warnings and errors emitted
+        /// by a component's most recent solution. The Python tool
+        /// gh_get_runtime_messages hits this rather than fishing them out of
+        /// get_objects payloads.
+        /// </summary>
+        private JObject GetRuntimeMessages(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(guid))
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "instance_guid is required." };
+                        return;
+                    }
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true) as IGH_ActiveObject;
+                    if (obj == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object not found or not active." };
+                        return;
+                    }
+                    var messages = new JArray();
+                    foreach (GH_RuntimeMessageLevel level in new[] {
+                        GH_RuntimeMessageLevel.Error,
+                        GH_RuntimeMessageLevel.Warning,
+                        GH_RuntimeMessageLevel.Remark,
+                    })
+                    {
+                        foreach (var msg in obj.RuntimeMessages(level))
+                        {
+                            messages.Add(new JObject
+                            {
+                                ["level"] = level.ToString(),
+                                ["message"] = msg
+                            });
+                        }
+                    }
+                    result = new JObject
+                    {
+                        ["status"] = "success",
+                        ["result"] = new JObject
+                        {
+                            ["instance_guid"] = guid,
+                            ["nickname"] = (obj as IGH_DocumentObject)?.NickName ?? "",
+                            ["runtime_messages"] = messages
+                        }
+                    };
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error getting runtime messages: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Render the Grasshopper canvas to a PNG, base64-encoded. Lets the
+        /// multimodal LLM "see" the current topology.
+        ///
+        /// Uses GH_Canvas.GenerateHiResImage which is the supported API for
+        /// rendering the canvas at higher than screen resolution. Falls back
+        /// to a clear error if the canvas is empty or the API misbehaves.
+        /// </summary>
+        private JObject CaptureCanvas(JObject cmd)
+        {
+            int maxSize = (int?)(cmd["max_size"] ?? 1200) ?? 1200;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var canvas = Grasshopper.Instances.ActiveCanvas;
+                    if (canvas == null || canvas.Document == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "No active Grasshopper canvas." };
+                        return;
+                    }
+                    var bbox = canvas.Document.BoundingBox(false);
+                    if (bbox.Width < 1 || bbox.Height < 1)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Canvas is empty — nothing to capture." };
+                        return;
+                    }
+                    bbox.Inflate(20, 20); // padding for nicer framing
+
+                    // GH_Canvas.GenerateHiResImage(RectangleF region, int dpi) — return a Bitmap.
+                    // Try via reflection so we don't hard-fail if the signature shifts between GH minor versions.
+                    System.Drawing.Bitmap bmp = null;
+                    var canvasType = canvas.GetType();
+                    var method = canvasType.GetMethod(
+                        "GenerateHiResImage",
+                        new[] { typeof(System.Drawing.RectangleF), typeof(int) }
+                    );
+                    if (method != null)
+                    {
+                        bmp = method.Invoke(canvas, new object[] { bbox, 96 }) as System.Drawing.Bitmap;
+                    }
+                    else
+                    {
+                        var method2 = canvasType.GetMethod(
+                            "GenerateHiResImage",
+                            new[] { typeof(System.Drawing.RectangleF) }
+                        );
+                        if (method2 != null)
+                            bmp = method2.Invoke(canvas, new object[] { bbox }) as System.Drawing.Bitmap;
+                    }
+                    if (bmp == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "GH_Canvas.GenerateHiResImage not available in this Grasshopper build." };
+                        return;
+                    }
+
+                    int origW = bmp.Width, origH = bmp.Height;
+                    using (bmp)
+                    using (var ms = new System.IO.MemoryStream())
+                    {
+                        if (bmp.Width > maxSize || bmp.Height > maxSize)
+                        {
+                            double scale = (double)maxSize / Math.Max(bmp.Width, bmp.Height);
+                            int w = Math.Max(1, (int)(bmp.Width * scale));
+                            int h = Math.Max(1, (int)(bmp.Height * scale));
+                            using (var scaled = new System.Drawing.Bitmap(bmp, w, h))
+                                scaled.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        else
+                        {
+                            bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        string b64 = Convert.ToBase64String(ms.ToArray());
+                        result = new JObject
+                        {
+                            ["status"] = "success",
+                            ["result"] = new JObject
+                            {
+                                ["data"] = b64,
+                                ["format"] = "png",
+                                ["original_width"] = origW,
+                                ["original_height"] = origH
+                            }
+                        };
+                    }
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+
+            done.Wait(15000); // canvas rendering can take a moment on large definitions
+            if (error != null) return ErrorResponse($"Error capturing canvas: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
     }
 }

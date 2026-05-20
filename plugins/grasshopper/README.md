@@ -46,6 +46,16 @@ Remove-Item "$env:APPDATA\Grasshopper\Libraries\rhino_gh_mcp_0704.gha"
 
 Restart Rhino after removing.
 
+### Refreshing the Grasshopper ribbon (Mac quirk)
+
+When you replace a `.gha` while Grasshopper has already shown its ribbon once,
+the ribbon thumbnail cache can stay stale — you'll see the *old* component
+icon and name in the ribbon even though Rhino has loaded the new `.gha`. The
+fix is to drag any component from the MCP tab onto the canvas once: that
+forces Grasshopper to rebuild the panel from the live assembly, and after
+that the ribbon shows the v1 entry. If you still don't see the new component,
+quit Rhino fully (Cmd+Q) and reopen.
+
 ### 1. Install v1
 
 **Mac (Rhino 8):**
