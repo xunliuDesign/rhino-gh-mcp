@@ -26,8 +26,10 @@ namespace RhinoGhMcp
         /// the port configured below (default 9999).
         /// </summary>
         public McpServerComponent()
-          : base("MCP Server", "MCPServer",
-            "Hosts the rhino-gh-mcp command bridge for the LLM-side Python server.",
+          : base("rhino-gh-mcp Server (v1)", "MCPv1",
+            "Hosts the rhino-gh-mcp v1 command bridge for the Python MCP server. " +
+            "Replaces the v0 'rhino_gh_mcp MCP Server' component — uninstall the " +
+            "v0 .gha or you'll get duplicates in the ribbon.",
             "MCP", "Server")
         {
         }
@@ -47,6 +49,8 @@ namespace RhinoGhMcp
             pManager.AddIntegerParameter("SetParameterMode", "SetParamMode", "0 or empty: panel mode (default), 1: interactive UI mode (slider if present, else panel), 2: volatile data mode (always)", GH_ParamAccess.item, 0);
             // Add RecomputeAll boolean input
             pManager.AddBooleanParameter("AutoRecompute", "AutoRecomp", "Automatically recompute all after each command execution", GH_ParamAccess.item, false);
+            // v1 NEW: expose the listening port so it can be changed without rebuilding the .gha
+            pManager.AddIntegerParameter("Port", "Port", "TCP port the MCP HTTP listener binds to. Must match the Python server's --gh-port.", GH_ParamAccess.item, 9999);
 
             // If you want to change properties of certain parameters, 
             // you can use the pManager instance to access them by index:
@@ -62,6 +66,8 @@ namespace RhinoGhMcp
             // Output parameters do not have default values, but they too must have the correct access type.
             pManager.AddTextParameter("Status", "Status", "Server status", GH_ParamAccess.item);
             pManager.AddTextParameter("DebugOutput", "Debug", "Debug/sticky info", GH_ParamAccess.item);
+            // v1 NEW: explicit version output so you can verify which plugin is loaded
+            pManager.AddTextParameter("Version", "Version", "Plugin version + commit identifier", GH_ParamAccess.item);
 
             // Sometimes you want to hide a specific parameter from the Rhino preview.
             // You can use the HideParameter() method as a quick way:
@@ -79,14 +85,21 @@ namespace RhinoGhMcp
             string filter = "";
             int setParameterMode = 0;
             bool autoRecompute = false;
+            int portInput = 9999;
             if (!DA.GetData(0, ref run)) return;
             DA.GetData(1, ref filter);
             DA.GetData(2, ref setParameterMode);
             DA.GetData(3, ref autoRecompute);
+            DA.GetData(4, ref portInput);
 
             currentCategoryFilter = filter;
             currentSetParameterMode = setParameterMode;
             currentAutoRecompute = autoRecompute;
+
+            // Apply port from input. Only takes effect when the server isn't already running;
+            // changing the port while running won't rebind — toggle Run off and on.
+            if (serverThread == null || !serverThread.IsAlive)
+                port = portInput;
 
             // Start/stop server logic
             if (run && (serverThread == null || !serverThread.IsAlive))
@@ -120,6 +133,26 @@ namespace RhinoGhMcp
             }
             DA.SetData(0, serverStatus);
             DA.SetData(1, debugOutput);
+            DA.SetData(2, PluginVersionString);
+        }
+
+        // v1 NEW: build a version string from the assembly so users can sanity-check
+        // which plugin Grasshopper actually loaded.
+        private static readonly string PluginVersionString = BuildVersionString();
+        private static string BuildVersionString()
+        {
+            try
+            {
+                var asm = typeof(McpServerComponent).Assembly;
+                var name = asm.GetName();
+                return string.Format("rhino-gh-mcp v{0} ({1})",
+                    name.Version != null ? name.Version.ToString() : "0.0.0",
+                    "https://github.com/xunliuDesign/rhino-gh-mcp");
+            }
+            catch
+            {
+                return "rhino-gh-mcp v? (https://github.com/xunliuDesign/rhino-gh-mcp)";
+            }
         }
         /// <summary>
         /// The Exposure property controls where in the panel a component icon 
@@ -154,8 +187,10 @@ namespace RhinoGhMcp
         /// It is vital this Guid doesn't change otherwise old ghx files 
         /// that use the old ID will partially fail during loading.
         /// </summary>
-        // Component GUID preserved from v0 so existing .gh files keep referencing it.
-        public override Guid ComponentGuid => new Guid("f1795527-33da-4992-b55a-220f2b17f1dc");
+        // Fresh v1 GUID — intentionally different from the v0 component
+        // (f1795527-33da-4992-b55a-220f2b17f1dc) so the two plugins coexist as
+        // distinct components in the ribbon and you can tell which is loaded.
+        public override Guid ComponentGuid => new Guid("005a98bf-a9f8-4e11-a96a-ea4eafb59c4c");
 
         // --- Server State ---
         private Thread serverThread = null;

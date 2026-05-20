@@ -36,18 +36,41 @@ This produces:
 - `bin/Release/net7.0/RhinoGhMcp.gha` — use on **Mac**
 - `bin/Release/net7.0-windows/RhinoGhMcp.gha` — use on **Windows**
 
-Copy the right one to:
+Note that the Grasshopper libraries folder on Mac includes a profile UUID in
+its name (`Grasshopper (b45a29b1-...)`), so the install path is best expressed
+with a glob:
 
-- **Mac**: `~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper/Libraries/`
-- **Windows**: `%APPDATA%\Grasshopper\Libraries\`
+```bash
+# Mac
+cp bin/Release/net7.0/RhinoGhMcp.gha \
+   "$HOME/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper "*"/Libraries/"
+```
 
-On Mac, then right-click the copied `.gha` in Finder → **Get Info** → **Open
+```powershell
+# Windows
+Copy-Item bin\Release\net7.0-windows\RhinoGhMcp.gha `
+          "$env:APPDATA\Grasshopper\Libraries\"
+```
+
+**If you previously installed the v0 .gha**, remove it first or you'll see two
+MCP components in the ribbon:
+
+```bash
+# Mac — find then remove
+ls "$HOME/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper "*"/Libraries/" | grep -i mcp
+rm "$HOME/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper "*"/Libraries/rhino_gh_mcp_*.gha"
+```
+
+On Mac, right-click the copied `.gha` in Finder → **Get Info** → **Open
 anyway** so Gatekeeper allows it. On Windows, right-click → **Properties** →
 **Unblock**.
 
-Restart Rhino, open Grasshopper. You'll find a new tab **MCP** with a single
-**MCP Server** component. Drop it on the canvas, set `Run = True`. It should
-report `Listening on 127.0.0.1:9999`.
+Restart Rhino, open Grasshopper. You'll find a new tab **MCP** with the
+**rhino-gh-mcp Server (v1)** component (nickname `MCPv1`). Drop it on the
+canvas, set `Run = True`. Verify two things:
+
+- `Status` output reads `Listening on 127.0.0.1:9999`
+- `Version` output reads `rhino-gh-mcp v0.1.0 (https://github.com/xunliuDesign/rhino-gh-mcp)`
 
 See [`plugins/grasshopper/README.md`](../plugins/grasshopper/README.md) for
 full details.
