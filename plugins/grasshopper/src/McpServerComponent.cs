@@ -221,13 +221,29 @@ namespace RhinoGhMcp
 
         private JObject IsServerAvailable(JObject cmd)
         {
-            // Simple check - if we're here processing the command, the server is available
+            // Simple check - if we're here processing the command, the server is available.
+            // v0.1.2: include the live assembly version + location so callers can verify
+            // exactly which .gha Grasshopper actually loaded (useful when ribbon caches
+            // mislead and you suspect a stale build is hanging around).
+            string asmLocation = "?";
+            string asmVersion = "?";
+            try
+            {
+                var asm = typeof(McpServerComponent).Assembly;
+                asmVersion = asm.GetName().Version != null ? asm.GetName().Version.ToString() : "?";
+                asmLocation = asm.Location ?? "?";
+            }
+            catch { /* fall back to "?" */ }
             return SuccessResponse(new JObject
             {
                 ["available"] = true,
                 ["status"] = serverStatus,
                 ["host"] = host,
-                ["port"] = port
+                ["port"] = port,
+                ["plugin_name"] = "rhino-gh-mcp",
+                ["plugin_version"] = asmVersion,
+                ["assembly_location"] = asmLocation,
+                ["component_guid"] = "005a98bf-a9f8-4e11-a96a-ea4eafb59c4c"
             });
         }
 
