@@ -10,26 +10,26 @@ Two compiled binaries live inside Rhino at runtime:
 **Grasshopper plugin (v0.1.0)** — fresh build under [`./grasshopper/`](./grasshopper/).
 Targets Rhino 8 only (net7.0 + net7.0-windows). All v0 command handlers ported.
 
-**Rhino plugin** — being rewritten in [`./rhino/`](./rhino/). The v0 source in
-`_archive project/rhino_gh_mcp-main/rhino_script_client/` mixes the MCP service
-with an unrelated StreamDiffusion experiment we are dropping. P1 of the
-roadmap.
+**Rhino plugin (v0.1.0)** — fresh build under [`./rhino/`](./rhino/). Clean
+carve-out from the v0 archive (StreamDiffusion experiment dropped). Hosts
+the TCP-JSON listener on `127.0.0.1:9876` that the Python `rhino_*` tools
+talk to. Single net7.0 target works on both Mac and Windows.
 
-## Build the Grasshopper plugin
+## Build & install everything
+
+Each plugin ships its own `reinstall.sh` that builds + installs + handles
+the macOS Rhino-is-still-running quirk:
 
 ```bash
-cd plugins/grasshopper
-dotnet build -c Release
-# Mac:     bin/Release/net7.0/RhinoGhMcp.gha
-# Windows: bin/Release/net7.0-windows/RhinoGhMcp.gha
+cd plugins/grasshopper && ./reinstall.sh          # GH plugin
+cd plugins/rhino       && ./reinstall.sh          # Rhino plugin (first time: see plugins/rhino/README.md)
 ```
 
-Install path:
-- **Mac**: `~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper/Libraries/`
-- **Windows**: `%APPDATA%\Grasshopper\Libraries\`
+After installing, restart Rhino. Then:
+- Open Grasshopper → drag **rhino-gh-mcp Server (v1)** onto a canvas, set `Run = True`
+- In Rhino's command line, type `_ToggleMcpService` to start the listener
 
-Right-click the copied `.gha` and Unblock / Open-anyway on first launch, then
-restart Rhino.
+You can now run the smoke tests under [../examples](../examples).
 
 ## Distribution roadmap
 

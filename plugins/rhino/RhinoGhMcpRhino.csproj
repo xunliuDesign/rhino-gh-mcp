@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Rhino 8 target. This plugin doesn't need WinForms / WPF, so a single
+      cross-platform net7.0 target is enough — Rhino 8 loads it on both
+      macOS and Windows. Rhino 7 (net48) is intentionally dropped.
+    -->
+    <TargetFramework>net7.0</TargetFramework>
+    <RootNamespace>RhinoGhMcp.Rhino</RootNamespace>
+    <AssemblyName>RhinoGhMcpRhino</AssemblyName>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <TargetExt>.rhp</TargetExt>
+    <NoWarn>NU1701</NoWarn>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Title>rhino-gh-mcp (Rhino plugin)</Title>
+    <Company>Xun Liu</Company>
+    <Description>Rhino-side MCP listener for rhino-gh-mcp. Companion to the Python MCP server.</Description>
+    <PackageProjectUrl>https://github.com/xunliuDesign/rhino-gh-mcp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/xunliuDesign/rhino-gh-mcp</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="RhinoCommon" Version="8.0.23304.9001" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Drawing.Common" Version="7.0.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <!-- Mono PDB shim for Mac debugging -->
+  <Target Name="CopyPdbForMonoDebugging" AfterTargets="AfterBuild">
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb"
+          DestinationFiles="$(TargetDir)$(TargetName).rhp.pdb"
+          Condition="$([MSBuild]::IsOSPlatform(OSX)) and Exists('$(TargetDir)$(TargetName).pdb')" />
+  </Target>
+
+</Project>
