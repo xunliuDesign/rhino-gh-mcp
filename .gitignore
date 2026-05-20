@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# uv
+.uv/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# .NET / C# / Rhino plugins
+bin/
+obj/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.gha
+*.rhp
+*.dll
+*.pdb
+Properties/launchSettings.json
+
+# Rhino / Grasshopper runtime
+*.3dmbak
+*.gh.bak
+*.ghuser.bak
+*.yak
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# mcpb output
+*.mcpb
+*.dxt
+
+# Claude Code (project-local user permissions, not for sharing)
+.claude/settings.local.json
+
+# Archive (kept locally, not pushed)
+_archive project/

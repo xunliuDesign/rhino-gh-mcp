@@ -1,0 +1,71 @@
+{
+  "manifest_version": "0.2",
+  "name": "rhino-gh-mcp",
+  "display_name": "Rhino / Grasshopper MCP",
+  "version": "0.1.0",
+  "description": "Tiered LLM control of Rhino 3D and Grasshopper for parametric design, architectural research, and teaching.",
+  "long_description": "Connects an MCP client (Claude Desktop, Claude Code, Cursor, web UI) to a running Rhino 8 session. Three tool-surface tiers — parameter-only, curated component group, full authority — let you scale from safe student exploration to script-component injection. Requires the companion .gha (Grasshopper) and .rhp (Rhino) plugins installed via Yak.",
+  "author": {
+    "name": "Xun Liu",
+    "url": "https://github.com/xunliuDesign"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/xunliuDesign/rhino-gh-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xunliuDesign/rhino-gh-mcp"
+  },
+  "keywords": ["rhino", "grasshopper", "mcp", "architecture", "parametric", "3d-modeling"],
+  "server": {
+    "type": "python",
+    "entry_point": "server/src/rhino_gh_mcp/__main__.py",
+    "mcp_config": {
+      "command": "${__dirname}/server/.venv/bin/python",
+      "args": ["-m", "rhino_gh_mcp"],
+      "env": {
+        "RHINO_GH_MCP_POLICY": "${user_config.policy}",
+        "RHINO_GH_MCP_GH_PORT": "${user_config.gh_port}",
+        "RHINO_GH_MCP_RHINO_PORT": "${user_config.rhino_port}",
+        "RHINO_GH_MCP_LOG_LEVEL": "${user_config.log_level}"
+      }
+    }
+  },
+  "user_config": {
+    "policy": {
+      "type": "string",
+      "title": "Control level",
+      "description": "Tool surface exposed to the LLM. 'parameter' = read + sliders only; 'curated' = adds a configured component allow-list; 'full' = everything including script-component injection.",
+      "default": "curated",
+      "enum": ["parameter", "curated", "full"],
+      "required": false
+    },
+    "gh_port": {
+      "type": "string",
+      "title": "Grasshopper bridge port",
+      "description": "Loopback HTTP port the .gha MCP Server component listens on.",
+      "default": "9999",
+      "required": false
+    },
+    "rhino_port": {
+      "type": "string",
+      "title": "Rhino bridge port",
+      "description": "Loopback TCP port the .rhp Rhino plugin listens on.",
+      "default": "9876",
+      "required": false
+    },
+    "log_level": {
+      "type": "string",
+      "title": "Log level",
+      "description": "Python logging level for the server (DEBUG / INFO / WARNING / ERROR).",
+      "default": "INFO",
+      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}
