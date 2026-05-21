@@ -39,22 +39,41 @@ namespace RhinoGhMcp
         /// </summary>
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
-            // Use the pManager object to register your input parameters.
-            // You can often supply default values when creating parameters.
-            // All parameters must have the correct access type. If you want 
-            // to import lists or trees of values, modify the ParamAccess flag.
+            // v0.1.5: inputs reorganised around two orthogonal axes:
+            //   - CAPABILITIES (what the LLM is allowed to do): AllowParameters / AllowComponents / AllowScripting
+            //   - SCOPE (which components are placeable, when AllowComponents=True): ComponentScope + CategoryFilter
+            // The legacy SetParameterMode input was dropped (panel mode is the only
+            // path used in practice).
             pManager.AddBooleanParameter("RunServer", "Run", "Start/stop the MCP server", GH_ParamAccess.item, false);
-            pManager.AddTextParameter("CategoryFilter", "Filter", "Component category filter (optional)", GH_ParamAccess.item, "MCP");
-            // Expose SetParameterMode as an integer input (optional, default 0)
-            pManager.AddIntegerParameter("SetParameterMode", "SetParamMode", "0 or empty: panel mode (default), 1: interactive UI mode (slider if present, else panel), 2: volatile data mode (always)", GH_ParamAccess.item, 0);
-            // Add RecomputeAll boolean input
-            pManager.AddBooleanParameter("AutoRecompute", "AutoRecomp", "Automatically recompute all after each command execution", GH_ParamAccess.item, false);
-            // v1 NEW: expose the listening port so it can be changed without rebuilding the .gha
-            pManager.AddIntegerParameter("Port", "Port", "TCP port the MCP HTTP listener binds to. Must match the Python server's --gh-port.", GH_ParamAccess.item, 9999);
 
-            // If you want to change properties of certain parameters, 
-            // you can use the pManager instance to access them by index:
-            //pManager[0].Optional = true;
+            pManager.AddBooleanParameter("AllowParameters", "AllowParams",
+                "Allow the LLM to adjust sliders, toggles, value-lists, and panels.",
+                GH_ParamAccess.item, true);
+            pManager.AddBooleanParameter("AllowComponents", "AllowComp",
+                "Allow the LLM to place / wire / remove components (subject to ComponentScope).",
+                GH_ParamAccess.item, true);
+            pManager.AddBooleanParameter("AllowScripting", "AllowScript",
+                "Allow the LLM to write code into Script components and execute code in the bridge. " +
+                "Powerful and risky - off by default.",
+                GH_ParamAccess.item, false);
+
+            pManager.AddIntegerParameter("ComponentScope", "Scope",
+                "When AllowComponents=True, which components are placeable: " +
+                "0 = curated (only categories listed in CategoryFilter); " +
+                "1 = gh defaults (stock Grasshopper components only); " +
+                "2 = all (everything, including third-party plug-ins).",
+                GH_ParamAccess.item, 0);
+            pManager.AddTextParameter("CategoryFilter", "Filter",
+                "Comma-separated category names allowed when ComponentScope=0 (curated). " +
+                "Example: 'MCP, Curve, Surface'. Ignored at higher scopes.",
+                GH_ParamAccess.item, "MCP");
+
+            pManager.AddBooleanParameter("AutoRecompute", "AutoRecomp",
+                "Automatically recompute all after each command execution.",
+                GH_ParamAccess.item, false);
+            pManager.AddIntegerParameter("Port", "Port",
+                "TCP port the MCP HTTP listener binds to. Must match the Python server's --gh-port.",
+                GH_ParamAccess.item, 9999);
         }
 
         /// <summary>
@@ -81,19 +100,30 @@ namespace RhinoGhMcp
         /// to store data in output parameters.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
+            // Inputs (v0.1.5 ordering): Run, AllowParameters, AllowComponents,
+            // AllowScripting, ComponentScope, CategoryFilter, AutoRecompute, Port.
             bool run = false;
-            string filter = "";
-            int setParameterMode = 0;
+            bool allowParams = true;
+            bool allowComponents = true;
+            bool allowScripting = false;
+            int componentScope = 0;
+            string filter = "MCP";
             bool autoRecompute = false;
             int portInput = 9999;
             if (!DA.GetData(0, ref run)) return;
-            DA.GetData(1, ref filter);
-            DA.GetData(2, ref setParameterMode);
-            DA.GetData(3, ref autoRecompute);
-            DA.GetData(4, ref portInput);
+            DA.GetData(1, ref allowParams);
+            DA.GetData(2, ref allowComponents);
+            DA.GetData(3, ref allowScripting);
+            DA.GetData(4, ref componentScope);
+            DA.GetData(5, ref filter);
+            DA.GetData(6, ref autoRecompute);
+            DA.GetData(7, ref portInput);
 
+            currentAllowParameters = allowParams;
+            currentAllowComponents = allowComponents;
+            currentAllowScripting = allowScripting;
+            currentComponentScope = Math.Max(0, Math.Min(2, componentScope));
             currentCategoryFilter = filter;
-            currentSetParameterMode = setParameterMode;
             currentAutoRecompute = autoRecompute;
 
             // Apply port from input. Only takes effect when the server isn't already running;
@@ -203,10 +233,24 @@ namespace RhinoGhMcp
         private string connectionLog = "";
         private TcpListener listener = null;
         private object serverLock = new object();
-        private string currentCategoryFilter = "";
+        private string currentCategoryFilter = "MCP";
 
-        private int currentSetParameterMode = 0;
+        // v0.1.5: capability + scope state (settable from canvas inputs).
+        private bool currentAllowParameters = true;
+        private bool currentAllowComponents = true;
+        private bool currentAllowScripting = false;
+        // 0 = curated (CategoryFilter), 1 = gh defaults, 2 = all
+        private int currentComponentScope = 0;
+
         private bool currentAutoRecompute = false;
+
+        // Legacy: SetParameterMode was a v0 input that picked between panel /
+        // interactive-UI / volatile-data modes for set_component_parameter. The
+        // input was dropped in v0.1.5 (panel mode was the only path used in
+        // practice). Kept as a const so the dead branches in SetComponentParameter
+        // still compile without touching that handler. Remove the dead code in a
+        // future cleanup pass.
+        private const int currentSetParameterMode = 0;
 
         // === Persistent Debug Log and Error System ===
         private static ConcurrentQueue<string> debugLog = new ConcurrentQueue<string>();
@@ -411,6 +455,16 @@ namespace RhinoGhMcp
         {
             try
             {
+                // v0.1.5: capability gate. Commands that mutate the canvas are
+                // grouped by which canvas-input flag they require. If the flag
+                // is off, refuse with a clean message naming the knob to flip.
+                if (_parameterWriteCommands.Contains(type) && !currentAllowParameters)
+                    return CapabilityDenied("AllowParameters");
+                if (_componentWriteCommands.Contains(type) && !currentAllowComponents)
+                    return CapabilityDenied("AllowComponents");
+                if (_scriptingCommands.Contains(type) && !currentAllowScripting)
+                    return CapabilityDenied("AllowScripting");
+
                 JObject result = null;
                 switch (type)
                 {
@@ -486,6 +540,10 @@ namespace RhinoGhMcp
                     case "set_value_list_selection":
                         result = SetValueListSelection(cmd);
                         break;
+                    // v0.1.5: expose current capability state to the Python server.
+                    case "get_capabilities":
+                        result = GetCapabilities(cmd);
+                        break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
                 }
@@ -494,8 +552,9 @@ namespace RhinoGhMcp
                 if (currentAutoRecompute && result != null && result["status"]?.ToString() == "success")
                 {
                     // Don't auto-recompute for certain commands that don't modify the document
-                    var readOnlyCommands = new[] { "get_context", "get_objects", "get_selected", "get_all_component_proxies", 
-                                                    "get_all_component_library", "get_debug_log", "is_server_available", "get_panel_content" };
+                    var readOnlyCommands = new[] { "get_context", "get_objects", "get_selected", "get_all_component_proxies",
+                                                    "get_all_component_library", "get_debug_log", "is_server_available", "get_panel_content",
+                                                    "get_capabilities", "get_runtime_messages" };
                     if (!readOnlyCommands.Contains(type))
                     {
                         var recomputeResult = RecomputeAll(new JObject());
@@ -529,26 +588,59 @@ namespace RhinoGhMcp
                 {
                     var doc = GetGHDocument();
                     var server = Grasshopper.Instances.ComponentServer;
-                    // Support multiple categories separated by commas
+
+                    // v0.1.5: ComponentScope decides which proxies are even
+                    // candidates. bypassFilter (from gh_add_any_component)
+                    // forces ALL scope for the single call.
+                    //   0 = curated:  intersect with CategoryFilter
+                    //   1 = defaults: only proxies whose assembly is part of Grasshopper itself
+                    //   2 = all:      no filter
+                    int effectiveScope = bypassFilter ? 2 : currentComponentScope;
                     List<string> categories = null;
-                    if (!bypassFilter && !string.IsNullOrWhiteSpace(currentCategoryFilter))
+                    if (effectiveScope == 0 && !string.IsNullOrWhiteSpace(currentCategoryFilter))
                     {
                         categories = currentCategoryFilter.Split(',')
                             .Select(c => c.Trim())
                             .Where(c => !string.IsNullOrEmpty(c))
                             .ToList();
                     }
+                    Func<IGH_ObjectProxy, bool> scopePredicate;
+                    if (effectiveScope == 0)
+                    {
+                        scopePredicate = (p) => categories == null || categories.Count == 0
+                            || categories.Any(cat => (p.Desc.Category ?? "").Equals(cat, StringComparison.OrdinalIgnoreCase));
+                    }
+                    else if (effectiveScope == 1)
+                    {
+                        // Stock Grasshopper components live in assemblies whose
+                        // simple name starts with "Grasshopper" (Grasshopper.dll,
+                        // Grasshopper.GUI, etc). Third-party plug-ins do not.
+                        scopePredicate = (p) =>
+                        {
+                            try
+                            {
+                                string asmName = p.GetType().Assembly.GetName().Name ?? "";
+                                return asmName.StartsWith("Grasshopper", StringComparison.OrdinalIgnoreCase);
+                            }
+                            catch { return false; }
+                        };
+                    }
+                    else
+                    {
+                        scopePredicate = (p) => true;
+                    }
+
                     var proxy = server.ObjectProxies.FirstOrDefault(p =>
                         p?.Desc != null &&
-                        (categories == null || categories.Count == 0
-                            ? true // No filter, allow any category
-                            : categories.Any(cat => (p.Desc.Category ?? "").Equals(cat, StringComparison.OrdinalIgnoreCase))) &&
+                        scopePredicate(p) &&
                         (p.Desc.Name == name || p.Desc.NickName == name)
                     );
                     if (proxy == null)
                     {
-                        string filterDesc = bypassFilter ? "(bypass=true, no filter)" : $"allowed categories '{currentCategoryFilter}'";
-                        result = new JObject { ["status"] = "error", ["result"] = $"Component '{name}' not found in {filterDesc}." };
+                        string scopeDesc = effectiveScope == 2 ? "ANY scope"
+                                         : effectiveScope == 1 ? "Grasshopper-default scope"
+                                         : $"curated scope (categories: {currentCategoryFilter})";
+                        result = new JObject { ["status"] = "error", ["result"] = $"Component '{name}' not found in {scopeDesc}." };
                     }
                     else
                     {
@@ -1514,6 +1606,66 @@ namespace RhinoGhMcp
         {
             // Not supported in C# context
             return ErrorResponse("execute_code is not supported in C# MCP server.");
+        }
+
+        // v0.1.5: command-name -> capability-bucket mappings, used by
+        // DispatchCommand to short-circuit out-of-capability calls.
+        private static readonly HashSet<string> _parameterWriteCommands = new HashSet<string>
+        {
+            "set_component_parameter",
+            "set_slider_range",
+            "set_toggle_value",
+            "set_value_list_selection",
+        };
+        private static readonly HashSet<string> _componentWriteCommands = new HashSet<string>
+        {
+            "add_component_to_canvas",
+            "add_slider_to_canvas",
+            "connect_components",
+            "remove_node",
+        };
+        private static readonly HashSet<string> _scriptingCommands = new HashSet<string>
+        {
+            "update_script",
+            "update_script_with_code_reference",
+            "execute_code",
+        };
+
+        // Shared denial response - mirrors the wording from the Python
+        // capabilities.denial_message helper so the LLM gets consistent
+        // guidance regardless of which side rejected the call.
+        private JObject CapabilityDenied(string knob)
+        {
+            return new JObject
+            {
+                ["status"] = "error",
+                ["result"] = $"Capability denied by canvas: set the `{knob}` input " +
+                             "on the rhino-gh-mcp Server component to True.",
+                ["denied_by"] = "canvas",
+                ["required_capability"] = knob,
+            };
+        }
+
+        // v0.1.5: report the live canvas-level capability state. The Python
+        // CapabilitiesProvider polls this and uses it to drive its runtime gate.
+        private JObject GetCapabilities(JObject cmd)
+        {
+            string scope = currentComponentScope == 2 ? "all"
+                         : currentComponentScope == 1 ? "defaults"
+                         : "curated";
+            return new JObject
+            {
+                ["status"] = "success",
+                ["result"] = new JObject
+                {
+                    ["allow_parameters"] = currentAllowParameters,
+                    ["allow_components"] = currentAllowComponents,
+                    ["allow_scripting"] = currentAllowScripting,
+                    ["component_scope"] = scope,
+                    ["category_filter"] = currentCategoryFilter,
+                    ["plugin_version"] = PluginVersionString,
+                },
+            };
         }
 
         // v0.1.4: direct write to a top-level Boolean Toggle widget. The

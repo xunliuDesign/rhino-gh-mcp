@@ -1,87 +1,46 @@
-"""Policy: which tool names are advertised to the LLM at startup.
+"""Legacy shim — the old hard-tier policy module.
 
-A Policy is an immutable filter applied at tool-registration time. Tools call
-`policy.allows(name)` before binding themselves to the FastMCP app, so the LLM
-literally cannot see tools outside its tier.
+The hard-tier `policy.allows(name)` mechanism has been replaced by the soft
+runtime `Capabilities` model in `rhino_gh_mcp.capabilities`. Tools are now
+registered unconditionally and gate themselves on capability state at call
+time.
 
-This is intentionally a coarse-grained allow-list. Finer-grained guards (e.g.
-"a placed component's category must be in the curated_group") live in the tool
-implementations themselves.
+This module is preserved so existing imports and tests don't break. The
+PARAMETER / CURATED / FULL frozensets are kept in sync with the new
+capability presets so anyone reasoning about "what does L1/L2/L3 mean"
+still gets a meaningful answer. New code should import from
+`rhino_gh_mcp.capabilities` instead.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..capabilities import (
+    _COMPONENT_WRITE_TOOLS,
+    _PARAMETER_WRITE_TOOLS,
+    _READ_TOOLS,
+    _SCRIPTING_TOOLS,
+)
 from ..config import Policy as PolicyEnum
 
-# --- Tool name registries --------------------------------------------------
-# Keep these strings in sync with the @app.tool() function names. The test
-# suite validates this invariant.
-
-PARAMETER_TOOLS: frozenset[str] = frozenset(
-    {
-        # Read-only inspection
-        "gh_status",
-        "gh_get_context",
-        "gh_get_objects",
-        "gh_get_selected",
-        "gh_list_sliders",
-        "gh_list_panels",
-        "gh_list_toggles",
-        "gh_list_value_lists",
-        "gh_canvas_summary",
-        "gh_find_components",
-        "gh_get_panel_content",
-        "gh_get_runtime_messages",
-        # Pure parameter writes
-        "gh_set_slider",
-        "gh_set_toggle",
-        "gh_select_value_list",
-        "gh_set_component_parameter",
-        "gh_recompute",
-        # Multimodal — read-only viewport
-        "gh_capture_canvas",
-        "rhino_capture_viewport",
-        # Rhino read
-        "rhino_status",
-        "rhino_get_scene_info",
-        "rhino_get_layers",
-        "rhino_get_objects_with_metadata",
-        "rhino_list_blocks",
-        # Rhino view (non-mutating to doc)
-        "rhino_set_view",
-    }
+# Same partition as before, derived from the capability buckets.
+PARAMETER_TOOLS: frozenset[str] = _READ_TOOLS | _PARAMETER_WRITE_TOOLS
+CURATED_TOOLS: frozenset[str] = PARAMETER_TOOLS | _COMPONENT_WRITE_TOOLS - frozenset(
+    {"gh_add_any_component"}
 )
-
-CURATED_TOOLS: frozenset[str] = PARAMETER_TOOLS | frozenset(
-    {
-        "gh_list_available_components",
-        "gh_add_component",
-        "gh_add_slider",
-        "gh_connect_components",
-        "gh_remove_node",
-        "gh_set_slider_range",
-    }
-)
-
-FULL_TOOLS: frozenset[str] = CURATED_TOOLS | frozenset(
-    {
-        "gh_add_any_component",
-        "gh_write_script_py3",
-        "gh_write_script_cs",
-        "gh_write_script_py2",
-        "gh_update_script",
-        "gh_execute_code",
-        "rhino_execute_code",
-        "rhino_run_named_command",
-    }
+FULL_TOOLS: frozenset[str] = CURATED_TOOLS | _SCRIPTING_TOOLS | frozenset(
+    {"gh_add_any_component"}
 )
 
 
 @dataclass(frozen=True)
 class Policy:
-    """An immutable allow-list of tool names."""
+    """Backward-compatible name-list view of a tier.
+
+    Used only by legacy tests and any external code that still imports
+    `policy_for`. Real gating now lives in `Capabilities.allows`.
+    """
 
     name: str
     tools: frozenset[str]

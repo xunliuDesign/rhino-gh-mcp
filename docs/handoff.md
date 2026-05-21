@@ -32,20 +32,42 @@ Three concrete outcomes drive every decision in this repo:
    around this — students start in `parameter` mode, graduate to `curated`,
    then `full`.
 
-## 2. The three-level control hierarchy
+## 2. The capability model (v0.1.5+)
 
-The single most important design decision. Each level is a *policy* that
-filters which tools the server registers, so the LLM literally cannot see
-tools outside its tier:
+**All tools are now always advertised** to the LLM. Whether a call is
+actually allowed is decided at runtime by two orthogonal axes set on the
+canvas-side `rhino-gh-mcp Server` component:
 
-| Level | CLI flag | Tool count | Allowed |
-|---|---|---|---|
-| **L1 — parameter** | `--policy parameter` | 25 | Read canvas/scene, change sliders/panels/toggles/value-lists, list blocks, switch views, recompute, capture viewport |
-| **L2 — curated** | `--policy curated` (default) | 31 | L1 + place from a configured component allow-list, wire, remove, set slider ranges |
-| **L3 — full** | `--policy full` | 39 | L2 + place any component, inject Python 3 / IronPython 2 / C# script components, execute arbitrary Rhino/GH code |
+| Axis | Inputs | Effect |
+|---|---|---|
+| **Capabilities** | `AllowParameters` / `AllowComponents` / `AllowScripting` (Booleans) | What category of action the LLM may take |
+| **Scope** | `ComponentScope` (0=curated / 1=defaults / 2=all) + `CategoryFilter` (text, used when scope=0) | When components may be placed, which ones |
 
-Policy logic in [`server/src/rhino_gh_mcp/policies/base.py`](../server/src/rhino_gh_mcp/policies/base.py).
-Tests verify the tiers are correctly nested and don't leak — [`server/tests/test_smoke.py`](../server/tests/test_smoke.py).
+The Python server caches the canvas state for ~3 s and re-queries via the
+`get_capabilities` bridge command. Flipping a toggle on the canvas
+propagates to the LLM within one cache TTL — no server restart needed.
+
+Calls that violate a capability return a clean, LLM-readable refusal
+naming the input to flip:
+
+> Capability denied by canvas: set the `AllowScripting` input on the
+> rhino-gh-mcp Server component to True.
+
+The CLI `--policy {parameter|curated|full}` flag still exists but now
+sets the **default** capability state at startup. The canvas overrides
+whenever it's reachable. The three presets are kept as a convenience:
+
+| Preset | allow_params | allow_components | allow_scripting | component_scope |
+|---|---|---|---|---|
+| `parameter` | ✅ | ❌ | ❌ | curated |
+| `curated` (default) | ✅ | ✅ | ❌ | curated |
+| `full` | ✅ | ✅ | ✅ | all |
+
+Total registered tools: **39** (under any preset — registration is unconditional).
+
+Implementation: [`server/src/rhino_gh_mcp/capabilities.py`](../server/src/rhino_gh_mcp/capabilities.py) (the dataclass + provider) and [`server/src/rhino_gh_mcp/tools/_gate.py`](../server/src/rhino_gh_mcp/tools/_gate.py) (the `@gated` decorator).
+Tests verify both the runtime gate and the preset mapping —
+[`server/tests/test_smoke.py`](../server/tests/test_smoke.py).
 
 ## 3. Architecture
 
@@ -102,14 +124,14 @@ tier.
 
 - ✅ Python MCP server boots, registers correct tool count per policy
 - ✅ Smoke tests: `uv run pytest` — 9/9 pass (server-side, no Rhino needed)
-- ✅ Grasshopper `.gha` v0.1.4 — builds on Mac (`net7.0` and `net7.0-windows`
+- ✅ Grasshopper `.gha` v0.1.5 — builds on Mac (`net7.0` and `net7.0-windows`
   targets), installs via `plugins/grasshopper/reinstall.sh`, hosts HTTP on
-  9999, 20 commands wired (canvas read/write, sliders, panels, toggles,
-  value-lists, script injection, runtime messages, canvas capture,
-  bypass_filter for L3). v0.1.3 extended `get_context` with widget values
-  (slider value/range, toggle state, value-list items + selection, panel
-  userText). v0.1.4 added direct-write handlers `set_toggle_value` and
-  `set_value_list_selection` (by name or index).
+  9999, 21 commands wired. v0.1.5 is the capability-gate refactor: 4 new
+  canvas inputs (AllowParameters, AllowComponents, AllowScripting,
+  ComponentScope) replace the old SetParameterMode input; a new
+  `get_capabilities` bridge command lets the Python server poll the live
+  canvas state; mutating handlers refuse with a clean knob-name message
+  when their capability is off.
 - ✅ Rhino `.rhp` v0.1.1 — 9 commands. v0.1.1 added `list_blocks`
   (enumerate InstanceDefinitions) and `set_view` (apply named view or
   switch to standard projection Top/Front/Right/Left/Back/Bottom/Perspective).
@@ -433,3 +455,40 @@ Second Windows pass — landed `.gha` v0.1.4 + `.rhp` v0.1.1, verified live:
     paths (set_toggle, select_value_list by index + by name) and the
     Rhino-side reads (list_blocks, set_view standards + error rejection).
     All 16/16 checks pass against a live Rhino on this machine.
+
+Third Windows pass — soft-gate refactor (2026-05-21):
+
+15. Refactored the policy system end to end. The old hard-tier approach
+    (server-side, "don't register tools above tier") had two problems
+    the user surfaced explicitly: (a) the active tier was buried in a
+    CLI flag instead of visible on the canvas where it belongs, and
+    (b) changing tier required a server restart, breaking ongoing
+    conversations. Replaced with a soft-gate capability model.
+
+16. Two orthogonal axes: Capabilities (AllowParameters /
+    AllowComponents / AllowScripting) say WHAT the LLM may do.
+    ComponentScope + CategoryFilter say WHICH components are
+    placeable when AllowComponents is on (0=curated, 1=GH defaults,
+    2=all). The user's proposal — and it shipped as proposed.
+
+17. `.gha` v0.1.5 input redesign: dropped SetParameterMode (niche
+    v0 cruft per user agreement), added 4 new inputs above. New
+    `get_capabilities` bridge command returns the live state. Dispatch
+    routes through a capability gate that refuses mutating commands
+    with a knob-name-in-message refusal.
+
+18. Python soft-gate plumbing: new `capabilities.py` (dataclass +
+    provider with 3 s TTL cache), new `tools/_gate.py` (@gated
+    decorator). Every tool now registers unconditionally; the gate
+    runs at call time. Old `policies/base.py` kept as a back-compat
+    shim. CLI `--policy` becomes a preset that seeds the default
+    capability state (the canvas overrides when reachable).
+
+19. Verified end-to-end on live Rhino: with AllowScripting=False on
+    the canvas, `rhino_execute_code` is cleanly denied; flip the
+    toggle to True on the canvas (no restart), the same call ~3 s
+    later creates a real Rhino sphere. The whole point of the
+    redesign — dynamic, canvas-driven, no restart — works.
+
+20. Tests: rewrote `test_smoke.py` for the new model. All 27 tests
+    pass. Plugin v0.1.4 → v0.1.5.

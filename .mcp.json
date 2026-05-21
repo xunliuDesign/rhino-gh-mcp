@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "rhino-gh": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "./server",
+        "run",
+        "rhino-gh-mcp",
+        "--policy",
+        "curated"
+      ]
+    }
+  }
+}

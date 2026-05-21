@@ -14,7 +14,8 @@ from ..bridges.grasshopper import BridgeError as GHBridgeError
 from ..bridges.grasshopper import GrasshopperBridge
 from ..bridges.rhino import BridgeError as RhinoBridgeError
 from ..bridges.rhino import RhinoBridge
-from ..policies import Policy
+from ..capabilities import CapabilitiesProvider, denial_message
+from ._gate import gated
 
 log = logging.getLogger(__name__)
 
@@ -23,55 +24,62 @@ def register(
     app: FastMCP,
     gh: GrasshopperBridge,
     rhino: RhinoBridge,
-    policy: Policy,
+    caps: CapabilitiesProvider,
 ) -> None:
-    def _gate(name: str) -> bool:
-        return policy.allows(name)
+    # Note: @gated returns a string on denial. The capture tools return
+    # mcp.Image, so we can't directly use the same decorator. We do an
+    # explicit capability check at the top, raising on denial (which MCP
+    # surfaces as an error). The check is functionally equivalent.
 
-    if _gate("rhino_capture_viewport"):
+    @app.tool(name="rhino_capture_viewport")
+    def rhino_capture_viewport(
+        layer: str | None = None,
+        show_annotations: bool = True,
+        max_size: int = 800,
+    ) -> Image:
+        """Capture the current Rhino viewport as a PNG.
 
-        @app.tool(name="rhino_capture_viewport")
-        def rhino_capture_viewport(
-            layer: str | None = None,
-            show_annotations: bool = True,
-            max_size: int = 800,
-        ) -> Image:
-            """Capture the current Rhino viewport as a PNG.
+        Args:
+            layer: Optional layer name - only annotations on this layer are shown.
+            show_annotations: When True, draw object short_ids over the image.
+            max_size: Max width or height in pixels.
+        """
+        c = caps.current()
+        if not c.allows("rhino_capture_viewport"):
+            raise RuntimeError(denial_message("rhino_capture_viewport", c))
+        try:
+            reply = rhino.send(
+                "capture_viewport",
+                layer=layer,
+                show_annotations=show_annotations,
+                max_size=max_size,
+            )
+        except RhinoBridgeError as exc:
+            raise RuntimeError(f"Rhino bridge error: {exc}") from exc
 
-            Args:
-                layer: Optional layer name — only annotations on this layer are shown.
-                show_annotations: When True, draw object short_ids over the image.
-                max_size: Max width or height in pixels.
-            """
-            try:
-                reply = rhino.send(
-                    "capture_viewport",
-                    layer=layer,
-                    show_annotations=show_annotations,
-                    max_size=max_size,
-                )
-            except RhinoBridgeError as exc:
-                raise RuntimeError(f"Rhino bridge error: {exc}") from exc
+        return _normalize_image_reply(reply, "viewport")
 
-            return _normalize_image_reply(reply, "viewport")
+    @app.tool(name="gh_capture_canvas")
+    def gh_capture_canvas(max_size: int = 1200) -> Image:
+        """Capture the current Grasshopper canvas as a PNG.
 
-    if _gate("gh_capture_canvas"):
+        Useful for the LLM to "see" the topology it just edited.
 
-        @app.tool(name="gh_capture_canvas")
-        def gh_capture_canvas(max_size: int = 1200) -> Image:
-            """Capture the current Grasshopper canvas as a PNG.
+        Args:
+            max_size: Max width or height in pixels.
+        """
+        c = caps.current()
+        if not c.allows("gh_capture_canvas"):
+            raise RuntimeError(denial_message("gh_capture_canvas", c))
+        try:
+            reply = gh.send("capture_canvas", max_size=max_size)
+        except GHBridgeError as exc:
+            raise RuntimeError(f"Grasshopper bridge error: {exc}") from exc
 
-            Useful for the LLM to "see" the topology it just edited.
+        return _normalize_image_reply(reply, "canvas")
 
-            Args:
-                max_size: Max width or height in pixels.
-            """
-            try:
-                reply = gh.send("capture_canvas", max_size=max_size)
-            except GHBridgeError as exc:
-                raise RuntimeError(f"Grasshopper bridge error: {exc}") from exc
-
-            return _normalize_image_reply(reply, "canvas")
+    # Silence unused-import lint if needed.
+    _ = gated
 
 
 def _normalize_image_reply(reply: dict[str, Any], kind: str) -> Image:

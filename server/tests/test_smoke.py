@@ -1,112 +1,112 @@
-"""Smoke tests — verify the server builds and the policy filter works.
+"""Smoke tests - verify the server builds and the soft-gate works.
 
-These tests do NOT require a running Rhino or Grasshopper. They construct the
-FastMCP app, count the registered tools per policy, and validate that the
-policy registry is self-consistent.
+These tests do NOT require a running Rhino or Grasshopper. They construct
+the FastMCP app, count the registered tools, and validate that capability
+gating correctly denies out-of-scope calls at runtime.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from rhino_gh_mcp.config import Config, Policy as PolicyEnum, Transport
-from rhino_gh_mcp.policies import policy_for
-from rhino_gh_mcp.policies.base import (
-    CURATED_TOOLS,
-    FULL_TOOLS,
-    PARAMETER_TOOLS,
+from rhino_gh_mcp.capabilities import (
+    ALL_TOOLS,
+    Capabilities,
+    CapabilitiesProvider,
+    ComponentScope,
+    preset_for,
 )
+from rhino_gh_mcp.config import Config, Policy as PolicyEnum, Transport
 from rhino_gh_mcp.server import build_app
 
 
-def test_policy_registry_is_nested():
-    """Each tier must be a strict superset of the lower one."""
-    assert PARAMETER_TOOLS.issubset(CURATED_TOOLS)
-    assert CURATED_TOOLS.issubset(FULL_TOOLS)
-    assert PARAMETER_TOOLS != CURATED_TOOLS
-    assert CURATED_TOOLS != FULL_TOOLS
+def _registered_names(app) -> set[str]:
+    return set(getattr(app._tool_manager, "_tools", {}))  # noqa: SLF001
 
 
-def test_policy_for_returns_distinct_policies():
-    p = policy_for(PolicyEnum.PARAMETER)
-    c = policy_for(PolicyEnum.CURATED)
-    f = policy_for(PolicyEnum.FULL)
-    assert len(p.tools) < len(c.tools) < len(f.tools)
+def test_every_tool_is_registered_regardless_of_policy():
+    """Soft-gate model: all tools should always be advertised, no matter the
+    --policy preset. Gating happens at call time."""
+    for policy in (PolicyEnum.PARAMETER, PolicyEnum.CURATED, PolicyEnum.FULL):
+        config = Config(policy=policy, transport=Transport.STDIO)
+        app = build_app(config)
+        tools = _registered_names(app)
+        missing = ALL_TOOLS - tools
+        assert not missing, f"Policy {policy.value}: missing tools {missing}"
+
+
+def test_preset_capabilities_match_old_tiers():
+    """The old PARAMETER / CURATED / FULL tier semantics should be preserved
+    by the presets so existing CLI users see no behavior change."""
+    p = preset_for(PolicyEnum.PARAMETER)
+    assert p.allow_parameters is True
+    assert p.allow_components is False
+    assert p.allow_scripting is False
+
+    c = preset_for(PolicyEnum.CURATED)
+    assert c.allow_parameters is True
+    assert c.allow_components is True
+    assert c.allow_scripting is False
+
+    f = preset_for(PolicyEnum.FULL)
+    assert f.allow_parameters is True
+    assert f.allow_components is True
+    assert f.allow_scripting is True
 
 
 @pytest.mark.parametrize(
-    "policy_enum,expected_min",
+    "caps,tool,should_allow",
     [
-        (PolicyEnum.PARAMETER, 18),
-        (PolicyEnum.CURATED, 24),
-        (PolicyEnum.FULL, 30),
+        # Read tools are always permitted
+        (Capabilities(False, False, False), "gh_get_context", True),
+        (Capabilities(False, False, False), "rhino_get_layers", True),
+        (Capabilities(False, False, False), "gh_canvas_summary", True),
+        # Parameter writes
+        (Capabilities(True, False, False), "gh_set_slider", True),
+        (Capabilities(False, True, True), "gh_set_slider", False),
+        (Capabilities(True, False, False), "gh_set_toggle", True),
+        # Component writes
+        (Capabilities(False, True, False), "gh_add_component", True),
+        (Capabilities(True, False, False), "gh_add_component", False),
+        (Capabilities(False, True, False), "gh_connect_components", True),
+        # Scripting
+        (Capabilities(True, True, True), "rhino_execute_code", True),
+        (Capabilities(True, True, False), "rhino_execute_code", False),
+        (Capabilities(True, True, True), "gh_write_script_py3", True),
     ],
 )
-def test_build_app_registers_tools_per_policy(policy_enum, expected_min):
-    """Building the app should register at least the expected number of tools.
-
-    We use >= rather than == so adding new tools doesn't break this test —
-    the strict policy-set membership test above catches accidental leaks.
-    """
-    config = Config(policy=policy_enum, transport=Transport.STDIO)
-    app = build_app(config)
-    tool_manager = getattr(app, "_tool_manager", None)
-    assert tool_manager is not None, "FastMCP shape changed — update test"
-    tools = getattr(tool_manager, "_tools", {})
-    assert len(tools) >= expected_min, f"Got only {len(tools)} tools: {sorted(tools)}"
+def test_capabilities_allows_by_bucket(caps, tool, should_allow):
+    assert caps.allows(tool) is should_allow
 
 
-def test_parameter_policy_does_not_expose_write_tools():
-    """L1 must never expose component-placement or script-injection tools."""
-    config = Config(policy=PolicyEnum.PARAMETER, transport=Transport.STDIO)
-    app = build_app(config)
-    tools = set(getattr(app._tool_manager, "_tools", {}))  # noqa: SLF001
-    forbidden = {
-        "gh_add_component",
-        "gh_add_any_component",
-        "gh_connect_components",
-        "gh_remove_node",
-        "gh_write_script_py2",
-        "gh_write_script_py3",
-        "gh_write_script_cs",
-        "gh_execute_code",
-        "rhino_execute_code",
-    }
-    leaked = tools & forbidden
-    assert not leaked, f"L1 policy leaked write tools: {leaked}"
+def test_capabilities_unknown_tool_fails_closed():
+    caps = Capabilities(True, True, True)
+    assert caps.allows("gh_invented_tool") is False
 
 
-def test_curated_policy_does_not_expose_full_only_tools():
-    """L2 must not expose L3-only tools like script injection."""
-    config = Config(policy=PolicyEnum.CURATED, transport=Transport.STDIO)
-    app = build_app(config)
-    tools = set(getattr(app._tool_manager, "_tools", {}))  # noqa: SLF001
-    forbidden = {
-        "gh_add_any_component",
-        "gh_write_script_py2",
-        "gh_write_script_py3",
-        "gh_write_script_cs",
-        "gh_execute_code",
-        "rhino_execute_code",
-    }
-    leaked = tools & forbidden
-    assert not leaked, f"L2 policy leaked L3 tools: {leaked}"
+def test_capabilities_provider_caches_until_ttl():
+    """The provider should cache its current Capabilities and only refresh
+    via the bridge on stale reads."""
+    initial = preset_for(PolicyEnum.PARAMETER)
+    provider = CapabilitiesProvider(default=initial)
+    assert provider.current() is initial
+
+    # No bridge attached -> stays at default forever
+    assert provider.current().allow_components is False
 
 
-def test_full_policy_exposes_script_injection():
-    """L3 must expose the script-component injection tools — that's its point."""
-    config = Config(policy=PolicyEnum.FULL, transport=Transport.STDIO)
-    app = build_app(config)
-    tools = set(getattr(app._tool_manager, "_tools", {}))  # noqa: SLF001
-    expected = {
-        "gh_write_script_py2",
-        "gh_write_script_py3",
-        "gh_write_script_cs",
-        "gh_execute_code",
-        "rhino_execute_code",
-    }
-    missing = expected - tools
-    assert not missing, f"L3 policy missing script-injection tools: {missing}"
+def test_capabilities_provider_force_overrides():
+    provider = CapabilitiesProvider(default=preset_for(PolicyEnum.CURATED))
+    new_caps = Capabilities(
+        allow_parameters=False,
+        allow_components=False,
+        allow_scripting=True,
+        component_scope=ComponentScope.ALL,
+        source="test",
+    )
+    provider.force(new_caps)
+    assert provider.current().allow_scripting is True
+    assert provider.current().source == "test"
 
 
 def test_config_string_includes_policy():

@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from rhino_gh_mcp.policies import policy_for
+from rhino_gh_mcp.capabilities import CapabilitiesProvider, preset_for
 from rhino_gh_mcp.config import Policy as PolicyEnum
 from rhino_gh_mcp.tools import gh_read
 
@@ -101,8 +101,8 @@ SAMPLE_CONTEXT: dict[str, dict[str, Any]] = {
 def app_and_bridge():
     app = FastMCP(name="test")
     bridge = StubBridge(SAMPLE_CONTEXT)
-    policy = policy_for(PolicyEnum.PARAMETER)
-    gh_read.register(app, bridge, policy)
+    caps = CapabilitiesProvider(default=preset_for(PolicyEnum.PARAMETER))
+    gh_read.register(app, bridge, caps)
     return app, bridge
 
 
@@ -176,6 +176,7 @@ def test_list_toggles_handles_bridge_error():
             return {"status": "error", "result": "boom"}
 
     app = FastMCP(name="test")
-    gh_read.register(app, ErrorBridge({}), policy_for(PolicyEnum.PARAMETER))
+    caps = CapabilitiesProvider(default=preset_for(PolicyEnum.PARAMETER))
+    gh_read.register(app, ErrorBridge({}), caps)
     out = _registered(app, "gh_list_toggles")()
     assert out.startswith("Error:")
