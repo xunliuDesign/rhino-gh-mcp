@@ -55,20 +55,45 @@ if (-not (Test-Path $built)) {
 Unblock-File -Path $built -ErrorAction SilentlyContinue
 
 # 3. Look for an existing registered install.
+# On WINDOWS, Rhino loads a drag-installed .rhp from wherever the file was
+# when first registered, recording that path in the registry under
+# HKCU\Software\McNeel\Rhinoceros\8.0\Plug-Ins\<guid>\PlugIn\FileName.
+# It does NOT copy the .rhp into AppData like it does on macOS.
 $pluginGuid = "3f88bb55-3368-4204-9d0a-55911c9349ee"
-$pluginsRoot = Join-Path $env:APPDATA "McNeel\Rhinoceros\8.0\Plug-ins"
 $installed = $null
-if (Test-Path $pluginsRoot) {
-    $installed = Get-ChildItem -Path $pluginsRoot -Filter "*$pluginGuid*" -Directory -ErrorAction SilentlyContinue |
-        ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.rhp" -ErrorAction SilentlyContinue } |
-        Select-Object -First 1
+
+$regPath = "HKCU:\Software\McNeel\Rhinoceros\8.0\Plug-Ins\$pluginGuid\PlugIn"
+if (Test-Path $regPath) {
+    $registeredPath = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue).FileName
+    if ($registeredPath -and (Test-Path $registeredPath)) {
+        $installed = Get-Item -Path $registeredPath
+    }
+}
+
+# Fallback: AppData layout (older Rhino versions / non-standard installs)
+if (-not $installed) {
+    $pluginsRoot = Join-Path $env:APPDATA "McNeel\Rhinoceros\8.0\Plug-ins"
+    if (Test-Path $pluginsRoot) {
+        $installed = Get-ChildItem -Path $pluginsRoot -Filter "*$pluginGuid*" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.rhp" -ErrorAction SilentlyContinue } |
+            Select-Object -First 1
+    }
 }
 
 if ($installed) {
     $dest = $installed.FullName
-    Write-Host "->Updating existing install at:" -ForegroundColor Cyan
-    Write-Host "    $dest"
-    Copy-Item -Path $built -Destination $dest -Force
+    if ($dest -eq $built) {
+        # The build output IS the registered install path - no copy needed,
+        # because dotnet build just overwrote the live .rhp in place.
+        Write-Host "->Plugin loads in place from build output:" -ForegroundColor Cyan
+        Write-Host "    $dest"
+        Write-Host "    (build already overwrote it - no copy step needed)"
+    }
+    else {
+        Write-Host "->Updating existing install at:" -ForegroundColor Cyan
+        Write-Host "    $dest"
+        Copy-Item -Path $built -Destination $dest -Force
+    }
     Unblock-File -Path $dest -ErrorAction SilentlyContinue
 
     $hash = (Get-FileHash -Path $dest -Algorithm MD5).Hash.ToLower()
@@ -76,7 +101,7 @@ if ($installed) {
         Select-Object -ExpandProperty Line -First 1)
 
     Write-Host ""
-    Write-Host "[OK]Updated. Restart Rhino, then run `_ToggleMcpService` to flip the listener on." -ForegroundColor Green
+    Write-Host "[OK]Updated. Launch Rhino, then run _ToggleMcpService to flip the listener on." -ForegroundColor Green
     Write-Host "   md5:     $hash"
     Write-Host "   version: $verString"
 }

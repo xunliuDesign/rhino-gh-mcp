@@ -36,6 +36,8 @@ PARAMETER_TOOLS: frozenset[str] = frozenset(
         "gh_get_runtime_messages",
         # Pure parameter writes
         "gh_set_slider",
+        "gh_set_toggle",
+        "gh_select_value_list",
         "gh_set_component_parameter",
         "gh_recompute",
         # Multimodal — read-only viewport
@@ -46,6 +48,9 @@ PARAMETER_TOOLS: frozenset[str] = frozenset(
         "rhino_get_scene_info",
         "rhino_get_layers",
         "rhino_get_objects_with_metadata",
+        "rhino_list_blocks",
+        # Rhino view (non-mutating to doc)
+        "rhino_set_view",
     }
 )
 

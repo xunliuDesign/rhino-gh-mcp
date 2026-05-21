@@ -40,9 +40,9 @@ tools outside its tier:
 
 | Level | CLI flag | Tool count | Allowed |
 |---|---|---|---|
-| **L1 — parameter** | `--policy parameter` | 21 | Read canvas/scene, change sliders/panels/toggles, recompute, capture viewport |
-| **L2 — curated** | `--policy curated` (default) | 27 | L1 + place from a configured component allow-list, wire, remove, set slider ranges |
-| **L3 — full** | `--policy full` | 35 | L2 + place any component, inject Python 3 / IronPython 2 / C# script components, execute arbitrary Rhino/GH code |
+| **L1 — parameter** | `--policy parameter` | 25 | Read canvas/scene, change sliders/panels/toggles/value-lists, list blocks, switch views, recompute, capture viewport |
+| **L2 — curated** | `--policy curated` (default) | 31 | L1 + place from a configured component allow-list, wire, remove, set slider ranges |
+| **L3 — full** | `--policy full` | 39 | L2 + place any component, inject Python 3 / IronPython 2 / C# script components, execute arbitrary Rhino/GH code |
 
 Policy logic in [`server/src/rhino_gh_mcp/policies/base.py`](../server/src/rhino_gh_mcp/policies/base.py).
 Tests verify the tiers are correctly nested and don't leak — [`server/tests/test_smoke.py`](../server/tests/test_smoke.py).
@@ -102,17 +102,17 @@ tier.
 
 - ✅ Python MCP server boots, registers correct tool count per policy
 - ✅ Smoke tests: `uv run pytest` — 9/9 pass (server-side, no Rhino needed)
-- ✅ Grasshopper `.gha` v0.1.3 — builds on Mac (`net7.0` and `net7.0-windows`
+- ✅ Grasshopper `.gha` v0.1.4 — builds on Mac (`net7.0` and `net7.0-windows`
   targets), installs via `plugins/grasshopper/reinstall.sh`, hosts HTTP on
-  9999, all 18 commands wired (canvas read/write, sliders, panels, script
-  injection, runtime messages, canvas capture, bypass_filter for L3).
-  v0.1.3 extends `get_context` to surface widget values (slider value/range,
-  toggle state, value-list items + selection, panel userText) so the new L1
-  list_* / canvas_summary tools have real data to project.
-- ✅ Rhino `.rhp` v0.1.0 — builds (single `net7.0` target), 7 commands
-  (`is_server_available`, `get_scene_info`, `get_layers`,
-  `get_objects_with_metadata`, `capture_viewport`, `execute_code`,
-  `run_named_command`)
+  9999, 20 commands wired (canvas read/write, sliders, panels, toggles,
+  value-lists, script injection, runtime messages, canvas capture,
+  bypass_filter for L3). v0.1.3 extended `get_context` with widget values
+  (slider value/range, toggle state, value-list items + selection, panel
+  userText). v0.1.4 added direct-write handlers `set_toggle_value` and
+  `set_value_list_selection` (by name or index).
+- ✅ Rhino `.rhp` v0.1.1 — 9 commands. v0.1.1 added `list_blocks`
+  (enumerate InstanceDefinitions) and `set_view` (apply named view or
+  switch to standard projection Top/Front/Right/Left/Back/Bottom/Perspective).
 - ✅ Bridge smoke tests in [`/examples`](../examples):
   - `smoke_test_bridge.py` — hits every GH command
   - `smoke_test_rhino.py` — hits every Rhino command
@@ -132,7 +132,7 @@ tier.
 | Phase | Scope |
 |---|---|
 | **P3** | Rhino 8 Script-component injection wired through the .gha (`gh_write_script_py3` / `_cs` currently send a `script_language` flag the .gha ignores; needs Script component creation + property setting) |
-| **P4** | Tool surface expansion: ✅ list_toggles, ✅ list_value_lists, ✅ canvas_summary, ✅ find_components; remaining: bake_to_rhino, group_components, set_view, list_blocks, measure_distance, set_toggle, set_value_list |
+| **P4** | Tool surface expansion: ✅ list_toggles, ✅ list_value_lists, ✅ canvas_summary, ✅ find_components, ✅ set_toggle, ✅ select_value_list, ✅ list_blocks, ✅ set_view; remaining: bake_to_rhino, group_components, measure_distance |
 | **P5** | Skills library: 5–6 workflows (massing, façade, structural grid, daylighting, zoning envelope), each with `.ghuser` files |
 | **P6** | Streamable HTTP transport + a thin web frontend |
 | **P7** | RAG over zoning corpora → 3D envelope → env metrics agent loop |
@@ -404,3 +404,32 @@ additions only; the user hasn't yet run Rhino on this machine.
    0.1.2 → 0.1.3. Built cleanly for both `net7.0` and `net7.0-windows`
    targets. **Untested in Rhino yet** — user verifies on next launch.
 8. Updated this doc + tool counts (L1: 17→21, L2: 23→27, L3: 31→35).
+
+Second Windows pass — landed `.gha` v0.1.4 + `.rhp` v0.1.1, verified live:
+
+9. Added two direct-write handlers on the GH side: `set_toggle_value`
+   (top-level Boolean Toggle's `.Value`) and `set_value_list_selection`
+   (matches `item` against ListItems by index OR Name). The generic
+   `set_component_parameter` couldn't reach these because it only knows
+   how to attach sources to component inputs, not to flip a widget that
+   IS the canvas object.
+10. Added two read/view handlers on the Rhino side: `list_blocks`
+    (enumerate `InstanceDefinitions` with name/id/object_count/update_type)
+    and `set_view` (apply a named view by name, or set the active
+    viewport to one of seven canned projections: Top/Front/Right/Left/
+    Back/Bottom/Perspective).
+11. Bumped plugin versions: `.gha` 0.1.3 → 0.1.4, `.rhp` 0.1.0 → 0.1.1.
+12. Wrote four new Python tools (`gh_set_toggle`, `gh_select_value_list`,
+    `rhino_list_blocks`, `rhino_set_view`), all L1. Updated
+    `policies/base.py` and `tests/test_smoke.py` count minimums.
+13. Found and fixed the Windows-only reinstall.ps1 bug: it was looking
+    for the Rhino .rhp install in `%APPDATA%\McNeel\Rhinoceros\8.0\Plug-ins`
+    (the macOS path). On Windows, Rhino registers drag-installed plugins
+    in the registry (`HKCU\Software\McNeel\Rhinoceros\8.0\Plug-Ins\<guid>\
+    PlugIn\FileName`) and loads the .rhp from wherever it was when first
+    registered. Updated the script to consult the registry first and
+    skip the file copy when the build output IS the registered path.
+14. Extended `examples/verify_widget_values.py` to cover the new write
+    paths (set_toggle, select_value_list by index + by name) and the
+    Rhino-side reads (list_blocks, set_view standards + error rejection).
+    All 16/16 checks pass against a live Rhino on this machine.

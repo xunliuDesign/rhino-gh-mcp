@@ -17,7 +17,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Title>rhino-gh-mcp (Rhino plugin)</Title>
     <Company>Xun Liu</Company>
     <Description>Rhino-side MCP listener for rhino-gh-mcp. Companion to the Python MCP server.</Description>

@@ -37,9 +37,9 @@ def test_policy_for_returns_distinct_policies():
 @pytest.mark.parametrize(
     "policy_enum,expected_min",
     [
-        (PolicyEnum.PARAMETER, 14),
-        (PolicyEnum.CURATED, 20),
-        (PolicyEnum.FULL, 26),
+        (PolicyEnum.PARAMETER, 18),
+        (PolicyEnum.CURATED, 24),
+        (PolicyEnum.FULL, 30),
     ],
 )
 def test_build_app_registers_tools_per_policy(policy_enum, expected_min):

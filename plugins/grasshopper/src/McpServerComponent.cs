@@ -479,6 +479,13 @@ namespace RhinoGhMcp
                     case "capture_canvas":
                         result = CaptureCanvas(cmd);
                         break;
+                    // v0.1.4 additions ----------------------------------------
+                    case "set_toggle_value":
+                        result = SetToggleValue(cmd);
+                        break;
+                    case "set_value_list_selection":
+                        result = SetValueListSelection(cmd);
+                        break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
                 }
@@ -1507,6 +1514,172 @@ namespace RhinoGhMcp
         {
             // Not supported in C# context
             return ErrorResponse("execute_code is not supported in C# MCP server.");
+        }
+
+        // v0.1.4: direct write to a top-level Boolean Toggle widget. The
+        // generic set_component_parameter handler can't flip a toggle that
+        // lives on the canvas as its own object (not as an input source) -
+        // it only knows how to attach sources to component inputs.
+        private JObject SetToggleValue(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            bool value = (bool?)cmd["value"] ?? false;
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    if (obj is GH_BooleanToggle toggle)
+                    {
+                        toggle.Value = value;
+                        toggle.ExpireSolution(true);
+                        result = new JObject
+                        {
+                            ["status"] = "success",
+                            ["result"] = new JObject
+                            {
+                                ["instance_guid"] = guid,
+                                ["value"] = value,
+                            },
+                        };
+                    }
+                    else
+                    {
+                        result = new JObject
+                        {
+                            ["status"] = "error",
+                            ["result"] = obj == null
+                                ? "Object not found."
+                                : $"Object is not a GH_BooleanToggle (kind={obj.GetType().Name}).",
+                        };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error setting toggle: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // v0.1.4: select an item in a top-level Value List by name OR by
+        // integer index. Single-select wins for ListMode.DropDown; for the
+        // multi-select modes (CheckList) we still set just one and clear
+        // any other selections, which is the common LLM-driven workflow.
+        private JObject SetValueListSelection(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            // `item` can be a string (match by Name) or an int (match by index)
+            JToken itemToken = cmd["item"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    if (!(obj is GH_ValueList vl))
+                    {
+                        result = new JObject
+                        {
+                            ["status"] = "error",
+                            ["result"] = obj == null
+                                ? "Object not found."
+                                : $"Object is not a GH_ValueList (kind={obj.GetType().Name}).",
+                        };
+                        return;
+                    }
+
+                    int? targetIndex = null;
+                    string targetName = null;
+                    if (itemToken == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Missing `item`." };
+                        return;
+                    }
+                    if (itemToken.Type == JTokenType.Integer)
+                    {
+                        targetIndex = (int)itemToken;
+                    }
+                    else
+                    {
+                        targetName = (string)itemToken;
+                        if (int.TryParse(targetName, out int parsed)) targetIndex = parsed;
+                    }
+
+                    int matchIndex = -1;
+                    if (targetIndex.HasValue && targetIndex.Value >= 0 && targetIndex.Value < vl.ListItems.Count)
+                    {
+                        matchIndex = targetIndex.Value;
+                    }
+                    else if (targetName != null)
+                    {
+                        for (int i = 0; i < vl.ListItems.Count; i++)
+                        {
+                            if (string.Equals(vl.ListItems[i].Name, targetName, StringComparison.Ordinal))
+                            {
+                                matchIndex = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (matchIndex < 0)
+                    {
+                        var available = string.Join(", ", vl.ListItems.Select(li => li.Name));
+                        result = new JObject
+                        {
+                            ["status"] = "error",
+                            ["result"] = $"Item '{itemToken}' not found. Available: [{available}]",
+                        };
+                        return;
+                    }
+
+                    for (int i = 0; i < vl.ListItems.Count; i++)
+                    {
+                        vl.ListItems[i].Selected = (i == matchIndex);
+                    }
+                    vl.ExpireSolution(true);
+
+                    result = new JObject
+                    {
+                        ["status"] = "success",
+                        ["result"] = new JObject
+                        {
+                            ["instance_guid"] = guid,
+                            ["selected_index"] = matchIndex,
+                            ["selected_name"] = vl.ListItems[matchIndex].Name,
+                        },
+                    };
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error setting value-list selection: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
         }
 
         private JObject GetPanelContent(JObject cmd)

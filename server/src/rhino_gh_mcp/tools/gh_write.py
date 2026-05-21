@@ -53,6 +53,54 @@ def register(app: FastMCP, gh: GrasshopperBridge, policy: Policy, config: Config
             except BridgeError as exc:
                 return f"Error: {exc}"
 
+    if _gate("gh_set_toggle"):
+
+        @app.tool(name="gh_set_toggle")
+        def gh_set_toggle(instance_guid: str, value: bool) -> str:
+            """Set the value of a top-level Boolean Toggle widget.
+
+            Use gh_list_toggles first to find the GUID. Recomputes downstream.
+
+            Args:
+                instance_guid: GUID of the Boolean Toggle.
+                value: New boolean value.
+            """
+            try:
+                return _result(
+                    gh.send(
+                        "set_toggle_value",
+                        instance_guid=instance_guid,
+                        value=bool(value),
+                    )
+                )
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
+    if _gate("gh_select_value_list"):
+
+        @app.tool(name="gh_select_value_list")
+        def gh_select_value_list(instance_guid: str, item: str) -> str:
+            """Select an item in a Value List by name OR by integer index.
+
+            Numeric strings are treated as indices first; if no item at that
+            index exists, fall back to a name match. To force a name match
+            for items whose name happens to be a number, prefix with a space.
+
+            Args:
+                instance_guid: GUID of the Value List (from gh_list_value_lists).
+                item: Item name (case-sensitive) or zero-based index (as string).
+            """
+            try:
+                return _result(
+                    gh.send(
+                        "set_value_list_selection",
+                        instance_guid=instance_guid,
+                        item=item,
+                    )
+                )
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
     if _gate("gh_set_component_parameter"):
 
         @app.tool(name="gh_set_component_parameter")

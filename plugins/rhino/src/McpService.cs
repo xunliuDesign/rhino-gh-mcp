@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Rhino;
+using Rhino.Display;
 using Rhino.DocObjects;
 using Rhino.Geometry;
 using Rhino.Runtime;
@@ -154,6 +155,9 @@ namespace RhinoGhMcp.Rhino
                     case "capture_viewport":    return CaptureViewport(p);
                     case "execute_code":        return ExecuteCode(p);
                     case "run_named_command":   return RunNamedCommand(p);
+                    // v0.1.1 additions ---------------------------------------
+                    case "list_blocks":         return ListBlocks();
+                    case "set_view":            return SetView(p);
                     default: return Err($"Unknown command type: {type}");
                 }
             }
@@ -376,6 +380,96 @@ namespace RhinoGhMcp.Rhino
                     return Ok(new JObject { ["command"] = command, ["success"] = ok });
                 }
                 catch (Exception ex) { return Err($"RunScript failed: {ex.Message}"); }
+            });
+        }
+
+        // v0.1.1: enumerate InstanceDefinitions (Rhino "blocks").
+        private string ListBlocks()
+        {
+            return OnUiThread(() =>
+            {
+                var doc = RhinoDoc.ActiveDoc;
+                if (doc == null) return Err("No active document.");
+
+                var blocks = new JArray();
+                foreach (var idef in doc.InstanceDefinitions)
+                {
+                    if (idef == null) continue;
+                    blocks.Add(new JObject
+                    {
+                        ["id"] = idef.Id.ToString(),
+                        ["index"] = idef.Index,
+                        ["name"] = idef.Name ?? "",
+                        ["description"] = idef.Description ?? "",
+                        ["object_count"] = idef.ObjectCount,
+                        ["is_reference"] = idef.IsReference,
+                        ["is_deleted"] = idef.IsDeleted,
+                        ["update_type"] = idef.UpdateType.ToString(),
+                    });
+                }
+                return Ok(new JObject { ["count"] = blocks.Count, ["blocks"] = blocks });
+            });
+        }
+
+        // v0.1.1: apply a named view OR set the active viewport's projection
+        // to one of the standard four (Top / Front / Right / Perspective).
+        // Pass `name` for a named view, or `standard` for one of the canned
+        // projections. If both are given, `name` wins.
+        private string SetView(JObject p)
+        {
+            string name = (string)p["name"];
+            string standard = (string)p["standard"];
+            if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(standard))
+                return Err("set_view requires either 'name' (named view) or 'standard' (Top|Front|Right|Perspective).");
+
+            return OnUiThread(() =>
+            {
+                var doc = RhinoDoc.ActiveDoc;
+                if (doc == null) return Err("No active document.");
+
+                if (!string.IsNullOrEmpty(name))
+                {
+                    int idx = -1;
+                    for (int i = 0; i < doc.NamedViews.Count; i++)
+                    {
+                        if (string.Equals(doc.NamedViews[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            idx = i;
+                            break;
+                        }
+                    }
+                    if (idx < 0)
+                    {
+                        var available = new List<string>();
+                        for (int i = 0; i < doc.NamedViews.Count; i++) available.Add(doc.NamedViews[i].Name);
+                        return Err($"Named view '{name}' not found. Available: [{string.Join(", ", available)}]");
+                    }
+                    var view = doc.Views.ActiveView;
+                    if (view == null) return Err("No active viewport.");
+                    bool ok = doc.NamedViews.Restore(idx, view.ActiveViewport);
+                    view.Redraw();
+                    return Ok(new JObject { ["applied_named_view"] = name, ["success"] = ok });
+                }
+
+                // Standard projection
+                var v2 = doc.Views.ActiveView;
+                if (v2 == null) return Err("No active viewport.");
+                var vp = v2.ActiveViewport;
+                switch (standard.ToLowerInvariant())
+                {
+                    case "top":         vp.SetProjection(DefinedViewportProjection.Top, null, true); break;
+                    case "front":       vp.SetProjection(DefinedViewportProjection.Front, null, true); break;
+                    case "right":       vp.SetProjection(DefinedViewportProjection.Right, null, true); break;
+                    case "left":        vp.SetProjection(DefinedViewportProjection.Left, null, true); break;
+                    case "back":        vp.SetProjection(DefinedViewportProjection.Back, null, true); break;
+                    case "bottom":      vp.SetProjection(DefinedViewportProjection.Bottom, null, true); break;
+                    case "perspective": vp.SetProjection(DefinedViewportProjection.Perspective, null, true); break;
+                    default:
+                        return Err($"Unknown standard projection '{standard}'. Use one of: Top, Front, Right, Left, Back, Bottom, Perspective.");
+                }
+                vp.ZoomExtents();
+                v2.Redraw();
+                return Ok(new JObject { ["applied_standard"] = standard.ToLowerInvariant() });
             });
         }
 

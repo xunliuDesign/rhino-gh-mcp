@@ -97,6 +97,46 @@ def register(app: FastMCP, rhino: RhinoBridge, policy: Policy) -> None:
             except BridgeError as exc:
                 return f"Error: {exc}"
 
+    if _gate("rhino_list_blocks"):
+
+        @app.tool(name="rhino_list_blocks")
+        def rhino_list_blocks() -> str:
+            """List all block (InstanceDefinition) definitions in the Rhino document.
+
+            Returns each block's name, id, object count, and update type. Useful
+            before placing block instances or generating a parametric assembly.
+            """
+            try:
+                return _result(rhino.send("list_blocks"))
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
+    if _gate("rhino_set_view"):
+
+        @app.tool(name="rhino_set_view")
+        def rhino_set_view(name: str | None = None, standard: str | None = None) -> str:
+            """Switch the active viewport to a named view or a standard projection.
+
+            Use exactly one of `name` or `standard`. Standard projections include:
+            Top, Front, Right, Left, Back, Bottom, Perspective. The viewport is
+            zoom-extents-ed after a standard projection change.
+
+            Args:
+                name: Named view (saved in the document) to restore.
+                standard: One of Top|Front|Right|Left|Back|Bottom|Perspective.
+            """
+            if (name is None) == (standard is None):
+                return "Error: pass exactly one of `name` or `standard`."
+            payload: dict[str, Any] = {}
+            if name is not None:
+                payload["name"] = name
+            if standard is not None:
+                payload["standard"] = standard
+            try:
+                return _result(rhino.send("set_view", **payload))
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
     if _gate("rhino_execute_code"):
 
         @app.tool(name="rhino_execute_code")
