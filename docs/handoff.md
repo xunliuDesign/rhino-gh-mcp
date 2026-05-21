@@ -1,0 +1,374 @@
+# Project handoff & status snapshot
+
+> Last updated: 2026-05-20, after commit `7270aef`.
+>
+> This document is the canonical "what is this and where are we" reference.
+> A fresh Claude Code session on any machine should be able to read this top
+> to bottom and pick up the project without context.
+
+## 0. TL;DR
+
+`rhino-gh-mcp` is an MCP server + Rhino/Grasshopper plugins that give an LLM
+tiered control of a Rhino 8 modeling session. The Python server is in
+[`/server`](../server), the C# plugins in [`/plugins`](../plugins), and the
+LLM-side workflow recipes in [`/skills`](../skills). v0.1.0+ skeleton is
+complete and end-to-end testable through smoke scripts in
+[`/examples`](../examples); the Claude Desktop integration is the last
+unverified link.
+
+## 1. Goals (the why)
+
+Three concrete outcomes drive every decision in this repo:
+
+1. **Open, sophisticated, easy-to-use MCP for Rhino/Grasshopper.** An LLM
+   should be able to read the GH canvas, change sliders, place components,
+   wire them, write script components, and drive Rhino directly — without
+   the user having to write any glue per session.
+2. **Research infrastructure.** Future projects need to live on top of this:
+   in particular, RAG over zoning text → parametric envelope → environmental
+   metrics, all driven by an agent loop.
+3. **Teaching platform.** A "virtual TA" that students can use to learn
+   Rhino/Grasshopper interactively. The tiered policy below is designed
+   around this — students start in `parameter` mode, graduate to `curated`,
+   then `full`.
+
+## 2. The three-level control hierarchy
+
+The single most important design decision. Each level is a *policy* that
+filters which tools the server registers, so the LLM literally cannot see
+tools outside its tier:
+
+| Level | CLI flag | Tool count | Allowed |
+|---|---|---|---|
+| **L1 — parameter** | `--policy parameter` | 17 | Read canvas/scene, change sliders/panels/toggles, recompute, capture viewport |
+| **L2 — curated** | `--policy curated` (default) | 23 | L1 + place from a configured component allow-list, wire, remove, set slider ranges |
+| **L3 — full** | `--policy full` | 31 | L2 + place any component, inject Python 3 / IronPython 2 / C# script components, execute arbitrary Rhino/GH code |
+
+Policy logic in [`server/src/rhino_gh_mcp/policies/base.py`](../server/src/rhino_gh_mcp/policies/base.py).
+Tests verify the tiers are correctly nested and don't leak — [`server/tests/test_smoke.py`](../server/tests/test_smoke.py).
+
+## 3. Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  MCP client: Claude Desktop / Claude Code / Cursor / web UI  │
+│  Loads Skills (workflows: landform, façade, zoning, ...)     │
+└────────────────────────────┬─────────────────────────────────┘
+                             │ MCP (stdio or streamable-http)
+┌────────────────────────────▼─────────────────────────────────┐
+│  rhino-gh-mcp Python server (FastMCP, mcp>=1.20)             │
+│  • Policy filter (L1/L2/L3) at tool-registration time        │
+│  • Two bridges, lazy-connected                               │
+└────────────┬───────────────────────────────┬─────────────────┘
+             │ HTTP /                        │ TCP one-shot
+             │ :9999                         │ :9876
+┌────────────▼──────────────┐     ┌──────────▼──────────────────┐
+│ RhinoGhMcp.gha            │     │ RhinoGhMcpRhino.rhp         │
+│ (Grasshopper plugin)      │     │ (Rhino plugin)              │
+│ MCP Server component on   │     │ MCPService TCP listener     │
+│ the canvas; UI-thread     │     │ on _ToggleMcpService;       │
+│ marshalled command        │     │ UI-thread marshalled        │
+│ dispatch                  │     │ command dispatch            │
+└───────────────┬───────────┘     └───────────────┬─────────────┘
+                │                                 │
+                └──── shared GH ↔ Rhino doc ──────┘
+```
+
+### Why two plugins not one
+
+- Grasshopper and Rhino have different threading models, different UI
+  lifetimes, and different SDK affordances. Keeping them split lets each
+  side use the threading model it's already good at.
+- The LLM can drive Rhino-only workflows (mesh cleanup, baking, named
+  commands) without needing Grasshopper open.
+
+### Why HTTP for GH and TCP for Rhino
+
+- GH's `.gha` component lifecycle is stable enough for a long-lived HTTP
+  listener (the component itself manages start/stop).
+- Rhino's listener has historically been flakier on macOS (the v0 archive
+  had an HTTP service that deadlocked under load). One-shot TCP — read
+  until EOF, dispatch on UI thread, write reply, close — is more robust.
+
+### Why a policy filter, not runtime checks
+
+If a tool isn't registered, the LLM never sees it in `tools/list`. Stronger
+than runtime guards — the model can't even *try* to call something out of
+tier.
+
+## 4. Current state — what works, what doesn't
+
+### What works end-to-end
+
+- ✅ Python MCP server boots, registers correct tool count per policy
+- ✅ Smoke tests: `uv run pytest` — 9/9 pass (server-side, no Rhino needed)
+- ✅ Grasshopper `.gha` v0.1.2 — builds on Mac (`net7.0` and `net7.0-windows`
+  targets), installs via `plugins/grasshopper/reinstall.sh`, hosts HTTP on
+  9999, all 18 commands wired (canvas read/write, sliders, panels, script
+  injection, runtime messages, canvas capture, bypass_filter for L3)
+- ✅ Rhino `.rhp` v0.1.0 — builds (single `net7.0` target), 7 commands
+  (`is_server_available`, `get_scene_info`, `get_layers`,
+  `get_objects_with_metadata`, `capture_viewport`, `execute_code`,
+  `run_named_command`)
+- ✅ Bridge smoke tests in [`/examples`](../examples):
+  - `smoke_test_bridge.py` — hits every GH command
+  - `smoke_test_rhino.py` — hits every Rhino command
+- ✅ Both `.gha` and `.rhp` self-report version via `is_server_available`
+  so you can sanity-check what's actually loaded.
+- ✅ Repo public at https://github.com/xunliuDesign/rhino-gh-mcp
+
+### What's done but not yet user-verified
+
+- ⏳ `.rhp` installation on the user's machine (built but never run inside
+  Rhino yet — the user is migrating to Windows before testing this half)
+- ⏳ Claude Desktop wire-up end-to-end (`docs/getting-started.md` has the
+  config; never executed)
+
+### Not implemented yet (planned)
+
+| Phase | Scope |
+|---|---|
+| **P3** | Rhino 8 Script-component injection wired through the .gha (`gh_write_script_py3` / `_cs` currently send a `script_language` flag the .gha ignores; needs Script component creation + property setting) |
+| **P4** | Tool surface expansion: list_toggles, list_value_lists, bake_to_rhino, group_components, set_view, list_blocks, measure_distance |
+| **P5** | Skills library: 5–6 workflows (massing, façade, structural grid, daylighting, zoning envelope), each with `.ghuser` files |
+| **P6** | Streamable HTTP transport + a thin web frontend |
+| **P7** | RAG over zoning corpora → 3D envelope → env metrics agent loop |
+| **P8** | Student-TA Skill bundle in `parameter` mode |
+
+## 5. Tech stack snapshot
+
+| Concern | Choice | Rationale |
+|---|---|---|
+| Server language | Python 3.11+ | FastMCP / mcp SDK is best-supported in Python |
+| MCP SDK | `mcp[cli] >= 1.20` | Current as of late 2025 |
+| Transport | stdio (default) + streamable-http (P6) | stdio for Claude Desktop; HTTP for web UI |
+| Package manager | `uv` | User preference; fast and reproducible |
+| Bridges | `httpx` (sync) for GH, `socket` for Rhino | Sync is fine — tool calls are inherently req/resp |
+| C# target | `net7.0` (+ `net7.0-windows` for .gha only) | Rhino 8 ships net7.0 runtime |
+| Rhino version | 8.x only | Rhino 7 / IronPython 2 dropped on purpose |
+| Plugin packaging | dotnet build → `.gha` / `.rhp`; future: `.yak` + `.mcpb` | One-click install in P-late |
+| License | MIT | Standard, friendly for student adoption |
+
+## 6. Directory layout
+
+```
+rhino-gh-mcp/
+├── server/                          # Python MCP server (uv project)
+│   ├── src/rhino_gh_mcp/
+│   │   ├── server.py                # FastMCP app + lifespan
+│   │   ├── config.py                # Policy + transport
+│   │   ├── __main__.py              # CLI entrypoint
+│   │   ├── bridges/                 # HTTP→GH, TCP→Rhino
+│   │   ├── policies/                # L1/L2/L3 tool allow-lists
+│   │   └── tools/                   # Tool implementations
+│   ├── tests/test_smoke.py          # Policy filter + registration tests
+│   └── pyproject.toml
+├── plugins/
+│   ├── grasshopper/                 # .gha (C# / net7.0[+-windows])
+│   │   ├── RhinoGhMcp.csproj
+│   │   ├── src/McpServerComponent.cs
+│   │   ├── src/RhinoGhMcpInfo.cs
+│   │   ├── reinstall.sh             # Mac install helper
+│   │   └── reinstall.ps1            # Windows install helper
+│   └── rhino/                       # .rhp (C# / net7.0)
+│       ├── RhinoGhMcpRhino.csproj
+│       ├── src/{Plugin,McpService,ToggleMcpServiceCommand,AssemblyInfo}.cs
+│       ├── reinstall.sh             # Mac install helper
+│       └── reinstall.ps1            # Windows install helper
+├── examples/
+│   ├── smoke_test_bridge.py         # GH bridge tests
+│   └── smoke_test_rhino.py          # Rhino bridge tests
+├── skills/
+│   └── landform-from-contours/      # First Skill (SKILL.md + userobjects/)
+├── mcpb/manifest.json               # Desktop Extension manifest (placeholder)
+├── docs/
+│   ├── architecture.md
+│   ├── getting-started.md
+│   └── handoff.md                   # THIS DOCUMENT
+└── _archive project/                # v0 reference (gitignored)
+```
+
+## 7. Operating the project — commands cheat sheet
+
+### Day-to-day (any OS)
+
+```bash
+# Server tests + smoke
+cd server
+uv sync
+uv run pytest
+uv run rhino-gh-mcp --help
+uv run rhino-gh-mcp --policy full     # L3 surface
+
+# Bridge smoke tests (need running plugins)
+uv run python ../examples/smoke_test_bridge.py
+uv run python ../examples/smoke_test_rhino.py --policy full
+```
+
+### Mac
+
+```bash
+cd plugins/grasshopper && ./reinstall.sh   # builds + installs .gha
+cd plugins/rhino       && ./reinstall.sh   # builds + first-time install instructions
+```
+
+In Rhino: `_ToggleMcpService` to start the listener.
+In Grasshopper: drag the **rhino-gh-mcp Server (v1)** component onto a canvas, set `Run = True`.
+
+### Windows
+
+See [§8 below](#8-migrating-to-windows).
+
+## 8. Migrating to Windows
+
+### One-time setup
+
+Install on the Windows machine:
+
+1. **Git for Windows** — https://git-scm.com/download/win
+2. **.NET 7+ SDK** — `winget install Microsoft.DotNet.SDK.8` (8 works fine, builds net7.0 targets)
+3. **Python 3.11 or 3.12** — `winget install Python.Python.3.12`
+4. **`uv`** — `winget install --id=astral-sh.uv`
+5. **Rhino 8** — already installed for the user
+6. **Claude Code or Claude Desktop** — whichever client you'll drive the MCP from
+
+### Clone & build
+
+```powershell
+cd $HOME\Desktop          # or wherever
+git clone https://github.com/xunliuDesign/rhino-gh-mcp.git
+cd rhino-gh-mcp\server
+uv sync
+uv run pytest             # 9/9 pass — sanity check
+```
+
+### Install plugins
+
+```powershell
+cd ..\plugins\grasshopper
+.\reinstall.ps1           # builds + copies .gha to %APPDATA%\Grasshopper\Libraries\
+
+cd ..\rhino
+.\reinstall.ps1           # builds; first-time: drag-drop the .rhp onto Rhino
+```
+
+In Rhino: `_ToggleMcpService`. In Grasshopper: drop **rhino-gh-mcp Server (v1)** on a canvas, `Run = True`.
+
+### Claude Desktop config on Windows
+
+Edit `%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "rhino-gh": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "C:\\Users\\<you>\\Desktop\\rhino-gh-mcp\\server",
+        "run",
+        "rhino-gh-mcp",
+        "--policy",
+        "curated"
+      ]
+    }
+  }
+}
+```
+
+Replace `<you>` with your username. Restart Claude Desktop.
+
+### Resuming work with Claude Code on Windows
+
+1. Install Claude Code: https://www.anthropic.com/claude-code
+2. Clone the repo, `cd` into it
+3. Open this very file (`docs/handoff.md`) and paste its first half into the
+   Claude Code session to ground it — or just ask Claude Code "read docs/handoff.md".
+4. The most useful follow-up prompts to start with:
+   - *"Run the smoke tests and tell me what's not working yet."*
+   - *"P3 next — wire script_language switching for `gh_write_script_py3` and `_cs` through the .gha so the Rhino 8 Script component is targetable."*
+   - *"Build the first useful Skill: package the landform user-objects from \_archive project/ into skills/landform-from-contours/userobjects/."*
+
+## 9. Key conventions established
+
+- **Tool naming**: `<bridge>_<verb>_<noun>`, e.g. `gh_add_component`,
+  `rhino_capture_viewport`. The bridge prefix matters because the policy
+  allow-lists key off the tool name.
+- **All Rhino doc / GH canvas mutations** marshal to the UI thread inside
+  the C# plugins. The bridge waits up to 5–15s for the UI dispatcher to
+  complete and returns a timeout error otherwise. Never block the listener
+  thread on a doc operation.
+- **Reply shape**: `{"status": "success"|"error", "result": <any>, "message": "..."}`.
+  The Python tool layer normalizes any "error" reply to a plain string the
+  LLM can read.
+- **Component GUIDs**: v0 used `f1795527-...`. v1 uses `005a98bf-...`. They
+  are intentionally distinct so the two `.gha`s coexist if both are
+  installed (helpful during migration). The v1 component is nicknamed
+  `MCPv1` in the canvas.
+- **Plugin versions**: bump on every backward-compatible change; the version
+  is reported by `is_server_available` so you can verify with a single
+  network call which build is live.
+- **Component icon and identity changes mean ribbon-cache refresh.** Mac
+  Grasshopper sometimes caches ribbon thumbnails — drag the component once
+  to force a rebuild, or fully `Cmd+Q` Rhino and reopen. The `reinstall.sh`
+  scripts handle the full-quit step.
+
+## 10. Open decisions / things to revisit
+
+- **Plugin distribution.** Currently the user builds locally. Once stable,
+  publish via Yak (`yak push`) so install becomes `_PackageManager → search`.
+- **Project name.** `rhino-gh-mcp` is descriptive but generic. We discussed
+  alternatives (`archgrasp`, `gh-conduit`, `parametrik`) but haven't picked
+  one. Defer until before public-launch announcement.
+- **`.mcpb` packaging.** The manifest in `mcpb/manifest.json` is a stub —
+  needs the actual `mcpb pack` workflow once the user installs the `mcpb`
+  CLI. One-click install in Claude Desktop is the user-facing payoff.
+- **Streamable HTTP transport for web UI.** The CLI already accepts
+  `--transport http --port 8765`; FastMCP exposes the `streamable-http`
+  transport, but no client has tested it. Validate when starting P6.
+- **Skill canonical format.** `skills/landform-from-contours/SKILL.md` is
+  the first one. Pattern for the rest:
+  - `name` + `description` frontmatter
+  - `policy` field (parameter / curated / full)
+  - `curated_group` field (component category allow-list)
+  - Step-by-step strategy in the body
+  - Bundled assets (`userobjects/`, `examples/`, etc.) referenced relatively
+
+## 11. Quick links
+
+- **Repo**: https://github.com/xunliuDesign/rhino-gh-mcp
+- **Architecture diagram**: [`architecture.md`](./architecture.md)
+- **Getting started**: [`getting-started.md`](./getting-started.md)
+- **Policy registry (the L1/L2/L3 source of truth)**:
+  [`server/src/rhino_gh_mcp/policies/base.py`](../server/src/rhino_gh_mcp/policies/base.py)
+- **All bridge command handlers**: GH side in
+  [`plugins/grasshopper/src/McpServerComponent.cs`](../plugins/grasshopper/src/McpServerComponent.cs),
+  Rhino side in
+  [`plugins/rhino/src/McpService.cs`](../plugins/rhino/src/McpService.cs)
+
+---
+
+## Session log — 2026-05-20 (Mac)
+
+What we did, in order, so anyone reading later understands the historical sequence:
+
+1. Designed v1 from scratch with the user (planning conversation, no code yet)
+2. Set up the Python server skeleton, policies, bridges, tool modules, smoke tests
+3. Initialized git, pushed to `xunliuDesign/rhino-gh-mcp`
+4. Ported the v0 `.gha` (`_archive project/rhino_gh_mcp-main/rhino_gh_mcp/`) into a fresh
+   `plugins/grasshopper/` project — renamed namespace, dropped Rhino 7 / net48 target,
+   added Port input + Version output, new ComponentGuid so v1 is visibly distinct
+5. Fixed install path glob for Mac (Libraries folder has a profile-UUID suffix)
+6. Added bridge handlers that the Python tools referenced but v0 didn't implement:
+   `bypass_filter`, `set_slider_range`, `get_runtime_messages`, `capture_canvas`
+7. Wrote `examples/smoke_test_bridge.py` — exercises every GH bridge command without Claude
+8. Found and fixed the "version still shows v0.1.0 after restart" symptom — root cause
+   was Rhino on macOS not quitting on Cmd+W. Added `reinstall.sh` that detects + force-quits
+9. Made `is_server_available` self-report plugin version + assembly location so the
+   running plugin can be inspected via the bridge
+10. Carved a clean `.rhp` out of the v0 `rhino_script_client/` archive — dropped the
+    StreamDiffusion experiment, implemented all 7 handlers, single net7.0 target
+11. Wrote `examples/smoke_test_rhino.py` — Rhino-side bridge smoke
+12. Wrote this handoff doc + Windows PowerShell mirrors of the reinstall scripts
+
+End of Mac session. Next session: Windows.

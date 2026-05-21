@@ -4,9 +4,12 @@
 > control over a Rhino 8 modeling session — for parametric design, architectural
 > research, and teaching.
 
-**Status:** v0.1.0 — Python MCP server + fresh Grasshopper `.gha` plugin
-build clean and run end-to-end. Rhino plugin (`.rhp`) and the rest of the
-Skills library land in the next pass.
+**Status:** v0.1.x — Python MCP server, Grasshopper `.gha` plugin, and
+Rhino `.rhp` plugin all build clean and pass smoke tests. The Skills library,
+Streamable HTTP transport, and `.mcpb` packaging land next.
+
+> **Picking up the project?** Read [`docs/handoff.md`](./docs/handoff.md) first —
+> it's the single canonical "what is this and where are we" document.
 
 ## What this is
 
