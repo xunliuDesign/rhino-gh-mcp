@@ -143,7 +143,11 @@ def register(app: FastMCP, gh: GrasshopperBridge, policy: Policy) -> None:
 
         @app.tool(name="gh_list_panels")
         def gh_list_panels() -> str:
-            """Return all Panel components on the canvas with their GUIDs and nicknames."""
+            """Return all Panel components on the canvas with their GUIDs and nicknames.
+
+            Panel text content is NOT included in this list — use
+            gh_get_panel_content(instance_guid) for that.
+            """
             try:
                 reply = gh.send("get_context", simplified=True)
                 if reply.get("status") == "error":
@@ -158,6 +162,165 @@ def register(app: FastMCP, gh: GrasshopperBridge, policy: Policy) -> None:
                     if "panel" in (info.get("kind") or "").lower()
                 ]
                 return json.dumps(panels, indent=2)
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
+    if _gate("gh_list_toggles"):
+
+        @app.tool(name="gh_list_toggles")
+        def gh_list_toggles() -> str:
+            """Return all Boolean Toggle widgets on the canvas with GUID, nickname, value.
+
+            `value` is the current toggle state; it may be None if the loaded .gha
+            predates v0.1.3 (older builds don't emit widget values — upgrade the
+            plugin if you need them).
+            """
+            try:
+                reply = gh.send("get_context", simplified=True)
+                if reply.get("status") == "error":
+                    return _result(reply)
+                ctx = reply.get("result", {}) or {}
+                toggles = [
+                    {
+                        "instance_guid": guid,
+                        "nickname": info.get("nickName") or info.get("name"),
+                        "value": info.get("value"),
+                    }
+                    for guid, info in ctx.items()
+                    if "booleantoggle" in (info.get("kind") or "").lower().replace("_", "")
+                    or info.get("name") == "Boolean Toggle"
+                ]
+                return json.dumps(toggles, indent=2)
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
+    if _gate("gh_list_value_lists"):
+
+        @app.tool(name="gh_list_value_lists")
+        def gh_list_value_lists() -> str:
+            """Return all Value List widgets on the canvas with items + current selection.
+
+            Each entry: {instance_guid, nickname, items: [{name, expression}, ...],
+            selected: [names]}. `items` / `selected` may be empty if the loaded
+            .gha predates v0.1.3.
+            """
+            try:
+                reply = gh.send("get_context", simplified=True)
+                if reply.get("status") == "error":
+                    return _result(reply)
+                ctx = reply.get("result", {}) or {}
+                lists = [
+                    {
+                        "instance_guid": guid,
+                        "nickname": info.get("nickName") or info.get("name"),
+                        "items": info.get("items") or [],
+                        "selected": info.get("selectedItems") or [],
+                    }
+                    for guid, info in ctx.items()
+                    if "valuelist" in (info.get("kind") or "").lower().replace("_", "")
+                    or info.get("name") == "Value List"
+                ]
+                return json.dumps(lists, indent=2)
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
+    if _gate("gh_canvas_summary"):
+
+        @app.tool(name="gh_canvas_summary")
+        def gh_canvas_summary() -> str:
+            """Return a high-level digest of the canvas — cheaper than gh_get_context.
+
+            Use this first when joining an existing session: it gives counts by
+            component kind, a flat list of parameter widgets (sliders/toggles/
+            value-lists/panels with GUID + nickname), and counts of components
+            carrying runtime errors or warnings.
+            """
+            try:
+                reply = gh.send("get_context", simplified=True)
+                if reply.get("status") == "error":
+                    return _result(reply)
+                ctx = reply.get("result", {}) or {}
+                kinds: dict[str, int] = {}
+                widgets: list[dict[str, Any]] = []
+                errors = 0
+                warnings = 0
+                for guid, info in ctx.items():
+                    kind = info.get("kind") or info.get("name") or "Unknown"
+                    kinds[kind] = kinds.get(kind, 0) + 1
+                    msgs = info.get("runtimeMessages") or info.get("messages") or []
+                    for m in msgs:
+                        level = (
+                            m.get("level") if isinstance(m, dict) else str(m)
+                        ) or ""
+                        if "error" in level.lower():
+                            errors += 1
+                            break
+                        if "warning" in level.lower():
+                            warnings += 1
+                            break
+                    nick = info.get("nickName") or info.get("name")
+                    kind_lc = kind.lower().replace("_", "")
+                    if "slider" in kind_lc:
+                        widgets.append({"guid": guid, "kind": "slider", "nickname": nick})
+                    elif "booleantoggle" in kind_lc:
+                        widgets.append({"guid": guid, "kind": "toggle", "nickname": nick})
+                    elif "valuelist" in kind_lc:
+                        widgets.append({"guid": guid, "kind": "value_list", "nickname": nick})
+                    elif "panel" in kind_lc:
+                        widgets.append({"guid": guid, "kind": "panel", "nickname": nick})
+                return json.dumps(
+                    {
+                        "total_objects": len(ctx),
+                        "components_by_kind": dict(
+                            sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))
+                        ),
+                        "widgets": widgets,
+                        "components_with_errors": errors,
+                        "components_with_warnings": warnings,
+                    },
+                    indent=2,
+                )
+            except BridgeError as exc:
+                return f"Error: {exc}"
+
+    if _gate("gh_find_components"):
+
+        @app.tool(name="gh_find_components")
+        def gh_find_components(query: str, limit: int = 50) -> str:
+            """Search canvas components by partial name/nickname (case-insensitive).
+
+            Use this to locate components without dumping the full canvas. Matches
+            against `name`, `nickName`, and `kind`.
+
+            Args:
+                query: Substring to match (case-insensitive).
+                limit: Maximum number of matches to return (default 50).
+            """
+            try:
+                reply = gh.send("get_context", simplified=True)
+                if reply.get("status") == "error":
+                    return _result(reply)
+                ctx = reply.get("result", {}) or {}
+                q = (query or "").lower().strip()
+                if not q:
+                    return json.dumps([], indent=2)
+                matches: list[dict[str, Any]] = []
+                for guid, info in ctx.items():
+                    haystack = " ".join(
+                        str(info.get(k) or "") for k in ("name", "nickName", "kind")
+                    ).lower()
+                    if q in haystack:
+                        matches.append(
+                            {
+                                "instance_guid": guid,
+                                "name": info.get("name"),
+                                "nickname": info.get("nickName"),
+                                "kind": info.get("kind"),
+                            }
+                        )
+                        if len(matches) >= limit:
+                            break
+                return json.dumps(matches, indent=2)
             except BridgeError as exc:
                 return f"Error: {exc}"
 

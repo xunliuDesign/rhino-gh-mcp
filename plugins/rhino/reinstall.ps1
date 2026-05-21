@@ -30,7 +30,7 @@ Set-Location -Path $PSScriptRoot
 if (-not $NoKill) {
     $rhinoProcs = Get-Process -Name "Rhino" -ErrorAction SilentlyContinue
     if ($rhinoProcs) {
-        Write-Host "⚠️  Rhino is running. Quitting it so the new .rhp can load." -ForegroundColor Yellow
+        Write-Host "[WARN]Rhino is running. Quitting it so the new .rhp can load." -ForegroundColor Yellow
         $rhinoProcs | ForEach-Object { $_.CloseMainWindow() | Out-Null }
         Start-Sleep -Seconds 2
         $rhinoProcs = Get-Process -Name "Rhino" -ErrorAction SilentlyContinue
@@ -43,7 +43,7 @@ if (-not $NoKill) {
 
 # 2. Build.
 if (-not $SkipBuild) {
-    Write-Host "→ Building (Release)..." -ForegroundColor Cyan
+    Write-Host "->Building (Release)..." -ForegroundColor Cyan
     dotnet build -c Release -v quiet | Select-Object -Last 5
 }
 
@@ -66,23 +66,23 @@ if (Test-Path $pluginsRoot) {
 
 if ($installed) {
     $dest = $installed.FullName
-    Write-Host "→ Updating existing install at:" -ForegroundColor Cyan
+    Write-Host "->Updating existing install at:" -ForegroundColor Cyan
     Write-Host "    $dest"
     Copy-Item -Path $built -Destination $dest -Force
     Unblock-File -Path $dest -ErrorAction SilentlyContinue
 
     $hash = (Get-FileHash -Path $dest -Algorithm MD5).Hash.ToLower()
-    $verString = (Select-String -Path $dest -Pattern "^\d+\.\d+\.\d+\.\d+$" -ErrorAction SilentlyContinue |
+    $verString = (Select-String -Path $dest -Pattern '^\d+\.\d+\.\d+\.\d+$' -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Line -First 1)
 
     Write-Host ""
-    Write-Host "✅ Updated. Restart Rhino, then run `_ToggleMcpService` to flip the listener on." -ForegroundColor Green
+    Write-Host "[OK]Updated. Restart Rhino, then run `_ToggleMcpService` to flip the listener on." -ForegroundColor Green
     Write-Host "   md5:     $hash"
     Write-Host "   version: $verString"
 }
 else {
     Write-Host ""
-    Write-Host "⚠️  First-time install — Rhino doesn't know about this plugin yet." -ForegroundColor Yellow
+    Write-Host "[WARN]First-time install - Rhino doesn't know about this plugin yet." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Drag the file below onto Rhino's main window, OR open Rhino and run the"
     Write-Host "`_PluginManager` command -> Install... -> browse to:"

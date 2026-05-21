@@ -28,6 +28,10 @@ PARAMETER_TOOLS: frozenset[str] = frozenset(
         "gh_get_selected",
         "gh_list_sliders",
         "gh_list_panels",
+        "gh_list_toggles",
+        "gh_list_value_lists",
+        "gh_canvas_summary",
+        "gh_find_components",
         "gh_get_panel_content",
         "gh_get_runtime_messages",
         # Pure parameter writes

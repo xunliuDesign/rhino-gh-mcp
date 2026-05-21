@@ -1180,7 +1180,59 @@ namespace RhinoGhMcp
             o["optional"] = param.Optional;
             o["sources"] = new JArray(param.Sources.Select(s => s.InstanceGuid.ToString()));
             o["targets"] = new JArray(param.Recipients.Select(r => r.InstanceGuid.ToString()));
+            AppendWidgetValue(o, param);
             return o;
+        }
+
+        // v0.1.3: surface the current value/state of canvas widgets so the LLM
+        // can see them via get_context without a separate per-component call.
+        // Older builds emitted only static metadata; gh_list_sliders etc.
+        // expect these fields.
+        private void AppendWidgetValue(JObject o, IGH_Param param)
+        {
+            try
+            {
+                if (param is GH_NumberSlider slider)
+                {
+                    o["value"] = (double)slider.Slider.Value;
+                    o["min"] = (double)slider.Slider.Minimum;
+                    o["max"] = (double)slider.Slider.Maximum;
+                    o["decimalPlaces"] = slider.Slider.DecimalPlaces;
+                    o["sliderType"] = slider.Slider.Type.ToString();
+                }
+                else if (param is GH_BooleanToggle toggle)
+                {
+                    o["value"] = toggle.Value;
+                }
+                else if (param is GH_ValueList vl)
+                {
+                    var items = new JArray();
+                    foreach (var item in vl.ListItems)
+                    {
+                        items.Add(new JObject
+                        {
+                            ["name"] = item.Name,
+                            ["expression"] = item.Expression,
+                        });
+                    }
+                    o["items"] = items;
+                    var selected = new JArray();
+                    foreach (var item in vl.ListItems)
+                    {
+                        if (item.Selected) selected.Add(item.Name);
+                    }
+                    o["selectedItems"] = selected;
+                    o["listMode"] = vl.ListMode.ToString();
+                }
+                else if (param is GH_Panel panel)
+                {
+                    o["userText"] = panel.UserText;
+                }
+            }
+            catch
+            {
+                // Never let value extraction break the wider get_context call.
+            }
         }
 
         // --- Utility: Success/Error Response ---
