@@ -90,6 +90,9 @@ class Capabilities:
 
 _READ_TOOLS: frozenset[str] = frozenset(
     {
+        # Server meta (skill discovery)
+        "list_skills",
+        "load_skill",
         # Grasshopper inspection
         "gh_status",
         "gh_get_context",

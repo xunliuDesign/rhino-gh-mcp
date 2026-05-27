@@ -25,12 +25,12 @@ Three concrete outcomes drive every decision in this repo:
    wire them, write script components, and drive Rhino directly — without
    the user having to write any glue per session.
 2. **Research infrastructure.** Future projects need to live on top of this:
-   in particular, RAG over zoning text → parametric envelope → environmental
-   metrics, all driven by an agent loop.
+   a substrate for agent-driven architectural analyses that combine
+   parametric design with domain knowledge.
 3. **Teaching platform.** A "virtual TA" that students can use to learn
-   Rhino/Grasshopper interactively. The tiered policy below is designed
-   around this — students start in `parameter` mode, graduate to `curated`,
-   then `full`.
+   Rhino/Grasshopper interactively. The capability gate is designed
+   around this — students start with `AllowParameters` only, graduate to
+   `+ AllowComponents`, then `+ AllowScripting` as they progress.
 
 ## 2. The capability model (v0.1.5+)
 
@@ -74,7 +74,7 @@ Tests verify both the runtime gate and the preset mapping —
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  MCP client: Claude Desktop / Claude Code / Cursor / web UI  │
-│  Loads Skills (workflows: landform, façade, zoning, ...)     │
+│  Loads Skills (workflows: landform, ladybug, façade, ...)    │
 └────────────────────────────┬─────────────────────────────────┘
                              │ MCP (stdio or streamable-http)
 ┌────────────────────────────▼─────────────────────────────────┐
@@ -155,9 +155,9 @@ tier.
 |---|---|
 | **P3** | Rhino 8 Script-component injection wired through the .gha (`gh_write_script_py3` / `_cs` currently send a `script_language` flag the .gha ignores; needs Script component creation + property setting) |
 | **P4** | Tool surface expansion: ✅ list_toggles, ✅ list_value_lists, ✅ canvas_summary, ✅ find_components, ✅ set_toggle, ✅ select_value_list, ✅ list_blocks, ✅ set_view; remaining: bake_to_rhino, group_components, measure_distance |
-| **P5** | Skills library: 5–6 workflows (massing, façade, structural grid, daylighting, zoning envelope), each with `.ghuser` files |
+| **P5** | Skills library: 5–6 workflows (massing, façade, structural grid, daylighting), each with `.ghuser` files where relevant |
 | **P6** | Streamable HTTP transport + a thin web frontend |
-| **P7** | RAG over zoning corpora → 3D envelope → env metrics agent loop |
+| **P7** | Domain-specific RAG → 3D model → env metrics agent loop (planned application built on this substrate; not part of this repo) |
 | **P8** | Student-TA Skill bundle in `parameter` mode |
 
 ## 5. Tech stack snapshot

@@ -62,7 +62,7 @@ namespace RhinoGhMcp
                 "0 = curated (only categories listed in CategoryFilter); " +
                 "1 = gh defaults (stock Grasshopper components only); " +
                 "2 = all (everything, including third-party plug-ins).",
-                GH_ParamAccess.item, 0);
+                GH_ParamAccess.item, 1);
             pManager.AddTextParameter("CategoryFilter", "Filter",
                 "Comma-separated category names allowed when ComponentScope=0 (curated). " +
                 "Example: 'MCP, Curve, Surface'. Ignored at higher scopes.",
@@ -230,7 +230,6 @@ namespace RhinoGhMcp
         private int port = 9999;
         private string host = "127.0.0.1";
         private string lastError = null;
-        private string connectionLog = "";
         private TcpListener listener = null;
         private object serverLock = new object();
         private string currentCategoryFilter = "MCP";
@@ -240,17 +239,9 @@ namespace RhinoGhMcp
         private bool currentAllowComponents = true;
         private bool currentAllowScripting = false;
         // 0 = curated (CategoryFilter), 1 = gh defaults, 2 = all
-        private int currentComponentScope = 0;
+        private int currentComponentScope = 1;
 
         private bool currentAutoRecompute = false;
-
-        // Legacy: SetParameterMode was a v0 input that picked between panel /
-        // interactive-UI / volatile-data modes for set_component_parameter. The
-        // input was dropped in v0.1.5 (panel mode was the only path used in
-        // practice). Kept as a const so the dead branches in SetComponentParameter
-        // still compile without touching that handler. Remove the dead code in a
-        // future cleanup pass.
-        private const int currentSetParameterMode = 0;
 
         // === Persistent Debug Log and Error System ===
         private static ConcurrentQueue<string> debugLog = new ConcurrentQueue<string>();
@@ -1420,148 +1411,12 @@ namespace RhinoGhMcp
                         result = new JObject { ["status"] = "error", ["result"] = $"Parameter '{paramName}' not found." };
                         return;
                     }
-                    // --- Set parameter logic based on mode ---
-                    if (currentSetParameterMode == 2)
-                    {
-                        // VolatileData mode: always set VolatileData directly
-                        param.RemoveAllSources();
-                        param.VolatileData.Clear();
-                        try
-                        {
-                            var path = new Grasshopper.Kernel.Data.GH_Path(0);
-                            object typedValue = value;
-                            if (param is Param_Number && double.TryParse(value, out double d)) typedValue = d;
-                            else if (param is Param_Integer && int.TryParse(value, out int i)) typedValue = i;
-                            else if (param is Param_Boolean && bool.TryParse(value, out bool b)) typedValue = b;
-                            else if (param is Param_String) typedValue = value;
-                            else if (param is Param_Colour && System.Drawing.ColorTranslator.FromHtml(value) is System.Drawing.Color col) typedValue = col;
-                            else if (param is Param_FilePath) typedValue = value;
-                            else if (param is Param_Point && Rhino.Geometry.Point3d.TryParse(value, out var pt)) typedValue = pt;
-                            // For the following types, parsing from string is not directly supported, so just assign the string value
-                            else if (param is Param_Vector) typedValue = value;
-                            else if (param is Param_Plane) typedValue = value;
-                            else if (param is Param_Rectangle) typedValue = value;
-                            else if (param is Param_Box) typedValue = value;
-                            else if (param is Param_Arc) typedValue = value;
-                            else if (param is Param_Circle) typedValue = value;
-                            else if (param is Param_Line) typedValue = value;
-                            else if (param is Param_Curve) typedValue = value;
-                            else if (param is Param_Mesh) typedValue = value;
-                            else if (param is Param_Surface) typedValue = value;
-                            else if (param is Param_Brep) typedValue = value;
-                            else if (param is Param_Geometry) typedValue = value;
-                            param.AddVolatileData(path, 0, typedValue);
-                            result = new JObject { ["status"] = "success", ["result"] = $"Parameter '{paramName}' set to '{value}' (VolatileData mode)" };
-                        }
-                        catch (Exception ex)
-                        {
-                            result = new JObject { ["status"] = "error", ["result"] = $"Failed to set value: {ex.Message}" };
-                        }
-                        return; // Ensure no panel logic runs
-                    }
-                    if (currentSetParameterMode == 1)
-                    {
-                        // Interactive UI mode: add UI element if not present
-                        if (param.Sources.Count == 0)
-                        {
-                            // Numeric (double/int)
-                            if ((param is Param_Number) || (param is Param_Integer))
-                            {
-                                var newSlider = new GH_NumberSlider();
-                                newSlider.CreateAttributes();
-                                newSlider.Slider.Minimum = (decimal)0;
-                                newSlider.Slider.Maximum = (decimal)100;
-                                double sliderValue = 0;
-                                double.TryParse(value, out sliderValue);
-                                newSlider.Slider.Value = (decimal)Math.Max((double)newSlider.Slider.Minimum, Math.Min((double)newSlider.Slider.Maximum, sliderValue));
-                                newSlider.Attributes.Pivot = new System.Drawing.PointF(param.Attributes.Pivot.X - 120, param.Attributes.Pivot.Y);
-                                doc.AddObject(newSlider, false);
-                                param.AddSource(newSlider);
-                                result = new JObject { ["status"] = "success", ["result"] = $"Slider created and set to {sliderValue}" };
-                                return;
-                            }
-                            // Boolean
-                            if (param is Param_Boolean)
-                            {
-                                var toggle = new GH_BooleanToggle();
-                                toggle.CreateAttributes();
-                                bool boolValue = false;
-                                bool.TryParse(value, out boolValue);
-                                toggle.Value = boolValue;
-                                toggle.Attributes.Pivot = new System.Drawing.PointF(param.Attributes.Pivot.X - 120, param.Attributes.Pivot.Y);
-                                doc.AddObject(toggle, false);
-                                param.AddSource(toggle);
-                                result = new JObject { ["status"] = "success", ["result"] = $"Boolean toggle created and set to {boolValue}" };
-                                return;
-                            }
-                            // Color
-                            if (param is Param_Colour)
-                            {
-                                var swatch = new GH_ColourSwatch();
-                                swatch.CreateAttributes();
-                                try
-                                {
-                                    var color = System.Drawing.ColorTranslator.FromHtml(value);
-                                    swatch.SwatchColour = color;
-                                    swatch.Attributes.Pivot = new System.Drawing.PointF(param.Attributes.Pivot.X - 120, param.Attributes.Pivot.Y);
-                                    doc.AddObject(swatch, false);
-                                    param.AddSource(swatch);
-                                    result = new JObject { ["status"] = "success", ["result"] = $"Colour swatch created and set to {value}" };
-                                }
-                                catch
-                                {
-                                    result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as color for swatch." };
-                                }
-                                return;
-                            }
-                            // Fallback: Panel for all other types
-                        }
-                        // If already has a source, keep existing logic (slider, toggle, swatch, panel)
-                        if (param.Sources.Count == 1 && param.Sources[0] is GH_NumberSlider slider)
-                        {
-                            double sliderValue;
-                            if (double.TryParse(value, out sliderValue))
-                            {
-                                slider.Slider.Value = (decimal)Math.Max((double)slider.Slider.Minimum, Math.Min((double)slider.Slider.Maximum, sliderValue));
-                                result = new JObject { ["status"] = "success", ["result"] = $"Slider value set to {sliderValue}" };
-                            }
-                            else
-                            {
-                                result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as double for slider." };
-                            }
-                            return;
-                        }
-                        if (param.Sources.Count == 1 && param.Sources[0] is GH_BooleanToggle boolToggle)
-                        {
-                            bool boolValue;
-                            if (bool.TryParse(value, out boolValue))
-                            {
-                                boolToggle.Value = boolValue;
-                                result = new JObject { ["status"] = "success", ["result"] = $"Boolean toggle set to {boolValue}" };
-                            }
-                            else
-                            {
-                                result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as boolean for toggle." };
-                            }
-                            return;
-                        }
-                        if (param.Sources.Count == 1 && param.Sources[0] is GH_ColourSwatch colourSwatch)
-                        {
-                            try
-                            {
-                                var color = System.Drawing.ColorTranslator.FromHtml(value);
-                                colourSwatch.SwatchColour = color;
-                                result = new JObject { ["status"] = "success", ["result"] = $"Colour swatch set to {value}" };
-                            }
-                            catch
-                            {
-                                result = new JObject { ["status"] = "error", ["result"] = $"Failed to parse value '{value}' as color for swatch." };
-                            }
-                            return;
-                        }
-                        // Fallback to panel mode if no slider, toggle, or swatch
-                    }
-                    // Panel mode (default, or fallback): always use a panel for value setting
+                    // v0.1.5+: panel mode is the only supported behavior.
+                    // Earlier versions also had a "VolatileData" mode and an
+                    // "interactive UI" auto-create-widget mode behind a
+                    // SetParameterMode input; both were niche v0 cruft and
+                    // were removed when the input was dropped. If you need
+                    // them back, restore from git history at commit 7e6fe90.
                     IGH_Param panelParam = null;
                     if (param.Sources.Count == 1 && param.Sources[0] is GH_Panel existingPanel)
                     {

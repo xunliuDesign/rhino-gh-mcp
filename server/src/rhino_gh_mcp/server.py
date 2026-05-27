@@ -12,7 +12,7 @@ from .bridges.grasshopper import GrasshopperBridge
 from .bridges.rhino import RhinoBridge
 from .capabilities import CapabilitiesProvider, preset_for
 from .config import Config
-from .tools import gh_read, gh_script, gh_write, multimodal, rhino_tools
+from .tools import gh_read, gh_script, gh_write, meta, multimodal, rhino_tools
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ def build_app(config: Config) -> FastMCP:
         lifespan=lifespan,
     )
 
+    meta.register(app, caps)
     gh_read.register(app, gh_bridge, caps)
     gh_write.register(app, gh_bridge, caps, config)
     gh_script.register(app, gh_bridge, caps)
@@ -104,7 +105,11 @@ def _server_instructions(config, default_caps) -> str:
         "canvas via the MCP Server component; 'rhino_*' tools talk to the Rhino "
         "document via the Rhino plugin. Before writing, read - call "
         "gh_get_context or rhino_get_scene_info to ground yourself. Work in "
-        "small steps and recompute / capture the viewport to verify."
+        "small steps and recompute / capture the viewport to verify. "
+        "BEFORE tackling any non-trivial task, call `list_skills` to see if "
+        "a workflow recipe exists for it; if a skill matches the user's "
+        "request, call `load_skill(<id>)` and follow it rather than "
+        "re-deriving the workflow."
     )
     soft_gate = (
         " All tools are advertised, but each tool is gated at call time by "

@@ -1,0 +1,36 @@
+# Normalize all text files to LF line endings in the repo.
+# Windows checkouts still see CRLF locally via core.autocrlf, but the canonical
+# repo state is LF — prevents the Windows ↔ Mac CRLF/LF churn that was making
+# every cross-platform sync show 30+ "modified" files for whitespace alone.
+* text=auto eol=lf
+
+# Explicit text classification for our common file types
+*.py            text eol=lf
+*.cs            text eol=lf
+*.csproj        text eol=lf
+*.sln           text eol=lf -text
+*.json          text eol=lf
+*.md            text eol=lf
+*.sh            text eol=lf
+*.ps1           text eol=lf
+*.toml          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.txt           text eol=lf
+*.gitignore     text eol=lf
+*.gitattributes text eol=lf
+LICENSE         text eol=lf
+.editorconfig   text eol=lf
+
+# Binary files — never touch
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.gha   binary
+*.rhp   binary
+*.dll   binary
+*.pdf   binary
+*.zip   binary
+*.ghuser binary
