@@ -1,0 +1,24 @@
+---
+name: rhinogh-mcp-grasshopper
+version: 0.1.8
+authors:
+  - Xun Liu
+description: >
+  rhino-gh-mcp Grasshopper bridge (.gha). Drop the "rhino-gh-mcp Server (v1)"
+  component on a canvas, set Run=True, and the rhino-gh-mcp Python MCP server
+  can read your canvas, add and wire components, drive sliders, capture the
+  viewport, and inject script components — all gated by visible AllowParameters
+  / AllowComponents / AllowScripting toggles on the component. Companion to
+  the rhinogh-mcp-rhino Rhino plugin and the Python MCP server (Claude Desktop
+  extension at github.com/xunliuDesign/rhino-gh-mcp).
+url: "https://github.com/xunliuDesign/rhino-gh-mcp"
+icon: icon.png
+keywords:
+  - mcp
+  - llm
+  - ai
+  - claude
+  - automation
+  - parametric
+  - architecture
+  - grasshopper
