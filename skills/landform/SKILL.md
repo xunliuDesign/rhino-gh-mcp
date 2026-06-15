@@ -26,6 +26,25 @@ bundled_assets:
   - "MCP_UserObjects_Landscape example/Noise Modifier.ghuser"
   - "MCP_UserObjects_Landscape example/Landform Render.ghuser"
   - "MCP_UserObjects_Landscape example/Vis Contour.ghuser"
+commands:
+  build_default_hill:
+    description: "Build the default circular-hill landform chain (BaseMesh -> Circle -> Grid Placer -> Absolute Modifier -> Render). Equivalent to the 'Worked example' below — useful for Execute mode where the user wants the canonical setup with no improvisation."
+    args:
+      height: "Maximum hill height in model units. Default 30."
+      radius: "Circle radius driving the placement. Default 60."
+    steps_summary: |
+      Places the 5 canonical components on a left-to-right row at x=100..900,
+      adds 4 sliders (size, resolution, radius, height), wires the required
+      chain including the base->modifier inputMesh feedback, recomputes,
+      captures the viewport. See "Worked example" section below for the
+      exact tool sequence.
+  resculpt_height:
+    description: "Adjust the height parameter on the active Absolute Modifier without restructuring the chain. Pure parameter edit — safe in Tune mode."
+    args:
+      height: "New height value. Constrained to the slider's range."
+    steps_summary: |
+      Finds the height slider on the canvas, sets its value, recomputes,
+      captures the viewport. No component placement.
 ---
 
 # Parametric Landform Skill

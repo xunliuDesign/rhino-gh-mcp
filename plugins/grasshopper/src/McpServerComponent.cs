@@ -2714,6 +2714,13 @@ namespace RhinoGhMcp
         private static Dictionary<long, HashSet<Guid>> turnChanges =
             new Dictionary<long, HashSet<Guid>>();
 
+        // v0.2.x — canvas-side highlight state. Populated by EndTurn, drained
+        // by DismissHighlights. The post-paint handler (OnCanvasPostPaint)
+        // draws a teal ring around every object in this set after the canvas
+        // finishes its normal render pass.
+        private static readonly HashSet<Guid> highlightedGuids = new HashSet<Guid>();
+        private static bool canvasHandlerHooked = false;
+
         // Public so the bridge handlers below — and v0.2.x highlight painter —
         // can append to the active turn from any thread.
         protected static void RecordTurnChange(Guid guid)
@@ -2747,6 +2754,7 @@ namespace RhinoGhMcp
         private JObject EndTurn(JObject cmd)
         {
             long turnId = (long?)cmd["turn_id"] ?? 0L;
+            HashSet<Guid> snapshot;
             lock (turnLock)
             {
                 if (turnId == 0 || !turnChanges.TryGetValue(turnId, out var set))
@@ -2758,35 +2766,101 @@ namespace RhinoGhMcp
                         ["changed_guids"] = new JArray(),
                     });
                 }
-                var arr = new JArray();
-                foreach (var g in set)
-                    arr.Add(g.ToString());
-                // TODO(v0.2.x): paint highlight badges on every canvas object in `set`
-                // (teal stroke for "added", orange for "modified"). Needs IGH_Attributes
-                // override or a custom IGH_DrawHandler. For now the AI gets the change
-                // list and narrates it in chat — that satisfies the v0.2.0 Coach UX.
-                return SuccessResponse(new JObject
-                {
-                    ["turn_id"] = turnId,
-                    ["changed_count"] = set.Count,
-                    ["changed_guids"] = arr,
-                });
+                snapshot = new HashSet<Guid>(set);
+                // v0.2.x — keep these GUIDs in the canvas highlight set until
+                // gh_dismiss_highlights is called. Union (not assign) so multi-turn
+                // sessions accumulate the badges instead of overwriting earlier turns.
+                highlightedGuids.UnionWith(set);
             }
+
+            // Touch the canvas outside the lock — UI thread + redraw to surface
+            // the rings the post-paint handler draws.
+            RunOnUiThread(() =>
+            {
+                EnsureCanvasHandlerHooked();
+                Grasshopper.Instances.ActiveCanvas?.Refresh();
+            });
+
+            var arr = new JArray();
+            foreach (var g in snapshot)
+                arr.Add(g.ToString());
+            return SuccessResponse(new JObject
+            {
+                ["turn_id"] = turnId,
+                ["changed_count"] = snapshot.Count,
+                ["changed_guids"] = arr,
+            });
         }
 
         private JObject DismissHighlights(JObject cmd)
         {
             long? turnId = (long?)cmd["turn_id"];
+            JObject response;
             lock (turnLock)
             {
                 if (turnId == null || turnId == 0)
                 {
                     int n = turnChanges.Count;
                     turnChanges.Clear();
-                    return SuccessResponse(new JObject { ["cleared_turns"] = n });
+                    highlightedGuids.Clear();
+                    response = new JObject { ["cleared_turns"] = n };
                 }
-                turnChanges.Remove(turnId.Value);
-                return SuccessResponse(new JObject { ["cleared_turn"] = turnId.Value });
+                else
+                {
+                    if (turnChanges.TryGetValue(turnId.Value, out var set) && set != null)
+                        highlightedGuids.ExceptWith(set);
+                    turnChanges.Remove(turnId.Value);
+                    response = new JObject { ["cleared_turn"] = turnId.Value };
+                }
+            }
+            RunOnUiThread(() => Grasshopper.Instances.ActiveCanvas?.Refresh());
+            return SuccessResponse(response);
+        }
+
+        // v0.2.x — lazily hook the canvas post-paint event so we draw highlights
+        // after the default render pass. Idempotent: safe to call from every
+        // EndTurn. We do NOT unhook on server stop — the handler is harmless
+        // when highlightedGuids is empty and Grasshopper tears it down with the
+        // canvas itself.
+        private static void EnsureCanvasHandlerHooked()
+        {
+            if (canvasHandlerHooked) return;
+            var canvas = Grasshopper.Instances.ActiveCanvas;
+            if (canvas == null) return;
+            canvas.CanvasPostPaintObjects -= OnCanvasPostPaint;
+            canvas.CanvasPostPaintObjects += OnCanvasPostPaint;
+            canvasHandlerHooked = true;
+        }
+
+        // Post-paint handler: walk highlightedGuids and outline each object's
+        // bounds with a teal ring. The color is deliberately distinct from
+        // Grasshopper's built-in selection (white) and runtime-message tints
+        // (warning yellow, error red) so the user can tell at a glance that
+        // the AI touched these.
+        private static void OnCanvasPostPaint(Grasshopper.GUI.Canvas.GH_Canvas sender)
+        {
+            HashSet<Guid> snapshot;
+            lock (turnLock)
+            {
+                if (highlightedGuids.Count == 0) return;
+                snapshot = new HashSet<Guid>(highlightedGuids);
+            }
+            var doc = sender?.Document;
+            if (doc == null) return;
+            var g = sender.Graphics;
+            if (g == null) return;
+            using (var pen = new System.Drawing.Pen(
+                System.Drawing.Color.FromArgb(255, 0, 200, 200), 3f))
+            {
+                pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                foreach (var guid in snapshot)
+                {
+                    var obj = doc.FindObject(guid, false);
+                    if (obj?.Attributes == null) continue;
+                    var bounds = System.Drawing.RectangleF.Inflate(
+                        obj.Attributes.Bounds, 4f, 4f);
+                    g.DrawRectangle(pen, bounds.X, bounds.Y, bounds.Width, bounds.Height);
+                }
             }
         }
 
