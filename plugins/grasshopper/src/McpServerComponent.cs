@@ -225,31 +225,46 @@ namespace RhinoGhMcp
         public override Guid ComponentGuid => new Guid("005a98bf-a9f8-4e11-a96a-ea4eafb59c4c");
 
         // --- Server State ---
-        private Thread serverThread = null;
-        private volatile bool runServer = false;
-        private string serverStatus = "Server Off";
-        private string debugOutput = "";
-        private int port = 9999;
-        private string host = "127.0.0.1";
-        private string lastError = null;
-        private TcpListener listener = null;
-        private object serverLock = new object();
-        private string currentCategoryFilter = "MCP";
+        // v0.2: visibility relaxed to `protected` so McpServerComponentV2 can
+        // inherit this class for its TCP listener + dispatch infrastructure
+        // without us duplicating ~2k lines of bridge code. V2 only overrides
+        // RegisterInputParams + SolveInstance + adds a Scenario knob; the
+        // rest of the protocol stays identical.
+        protected Thread serverThread = null;
+        protected volatile bool runServer = false;
+        protected string serverStatus = "Server Off";
+        protected string debugOutput = "";
+        protected int port = 9999;
+        protected string host = "127.0.0.1";
+        protected string lastError = null;
+        protected TcpListener listener = null;
+        protected object serverLock = new object();
+        protected string currentCategoryFilter = "MCP";
 
         // v0.1.5: capability + scope state (settable from canvas inputs).
-        private bool currentAllowParameters = true;
-        private bool currentAllowComponents = true;
-        private bool currentAllowScripting = false;
+        protected bool currentAllowParameters = true;
+        protected bool currentAllowComponents = true;
+        protected bool currentAllowScripting = false;
         // 0 = curated (CategoryFilter), 1 = gh defaults, 2 = all
-        private int currentComponentScope = 1;
+        protected int currentComponentScope = 1;
 
-        private bool currentAutoRecompute = false;
+        protected bool currentAutoRecompute = false;
+
+        // v0.2: scenario + active-skill state, set by V2 component's SolveInstance.
+        // V1 leaves these at defaults — the bridge surfaces them in get_capabilities
+        // so the Python server can derive its own gating decisions. Static so V2
+        // (a separate component instance) and V1 share the same authoritative state
+        // when both happen to be on the same canvas (edge case — only one bridge
+        // listener can hold the port at a time, but the fields are read elsewhere).
+        protected static string currentScenario = "author"; // inspect|tune|coach|execute|author
+        protected static string currentActiveSkill = "";    // empty = no skill restriction
 
         // === Persistent Debug Log and Error System ===
-        private static ConcurrentQueue<string> debugLog = new ConcurrentQueue<string>();
-        private void LogDebug(string msg) { debugLog.Enqueue($"[{DateTime.Now:HH:mm:ss}] {msg}"); if (debugLog.Count > 1000) debugLog.TryDequeue(out _); }
-        private void LogError(string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] {msg}"; LogDebug("ERROR: " + msg); }
-        private void LogError(string context, string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] [{context}] {msg}"; LogDebug($"ERROR [{context}]: {msg}"); }
+        // v0.2: protected so subclasses (V2) can log into the same buffer.
+        protected static ConcurrentQueue<string> debugLog = new ConcurrentQueue<string>();
+        protected void LogDebug(string msg) { debugLog.Enqueue($"[{DateTime.Now:HH:mm:ss}] {msg}"); if (debugLog.Count > 1000) debugLog.TryDequeue(out _); }
+        protected void LogError(string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] {msg}"; LogDebug("ERROR: " + msg); }
+        protected void LogError(string context, string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] [{context}] {msg}"; LogDebug($"ERROR [{context}]: {msg}"); }
         private JObject GetDebugLog(JObject cmd)
         {
             var arr = new JArray(debugLog.ToArray());
@@ -285,7 +300,8 @@ namespace RhinoGhMcp
         }
 
         // --- Server Thread Loop (scaffold) ---
-        private void ServerThreadLoop()
+        // v0.2: protected so V2 component can reuse the listener loop verbatim.
+        protected void ServerThreadLoop()
         {
             try
             {
@@ -547,6 +563,27 @@ namespace RhinoGhMcp
                         break;
                     case "read_script_source":
                         result = ReadScriptSource(cmd);
+                        break;
+                    // v0.2 additions ----------------------------------------
+                    // Turn tracking — Coach mode infrastructure. The Python
+                    // server brackets each AI response with begin/end_turn so
+                    // canvas-side highlighting (deferred to v0.2.x) can render
+                    // "what changed this turn" badges. In v0.2.0 the handlers
+                    // record state but do not paint anything.
+                    case "begin_turn":
+                        result = BeginTurn(cmd);
+                        break;
+                    case "end_turn":
+                        result = EndTurn(cmd);
+                        break;
+                    case "dismiss_highlights":
+                        result = DismissHighlights(cmd);
+                        break;
+                    // Skill reference file loading — places a saved .gh
+                    // definition's components onto the current canvas at a
+                    // chosen pivot. Gated as a component-write op.
+                    case "load_definition":
+                        result = LoadDefinitionFromBase64(cmd);
                         break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
@@ -1444,7 +1481,8 @@ namespace RhinoGhMcp
         }
 
         // --- Utility: Expire this component's solution from any thread (SAFELY)
-        private void ExpireComponentSolution()
+        // v0.2: protected so V2 component can call from its own thread loop.
+        protected void ExpireComponentSolution()
         {
             try
             {
@@ -2007,6 +2045,9 @@ namespace RhinoGhMcp
             "add_slider_to_canvas",
             "connect_components",
             "remove_node",
+            // v0.2: dropping a Skill's reference .gh onto the canvas mutates
+            // the component tree, so it needs AllowComponents.
+            "load_definition",
         };
         private static readonly HashSet<string> _scriptingCommands = new HashSet<string>
         {
@@ -2034,6 +2075,10 @@ namespace RhinoGhMcp
 
         // v0.1.5: report the live canvas-level capability state. The Python
         // CapabilitiesProvider polls this and uses it to drive its runtime gate.
+        // v0.2: additionally surface `scenario` and `active_skill` so the server
+        // can derive its own Coach/Execute-mode behaviour without re-asking the
+        // canvas. Old (v0.1) component leaves them at default values; new (v2)
+        // component sets them from its Scenario and ActiveSkill inputs.
         private JObject GetCapabilities(JObject cmd)
         {
             string scope = currentComponentScope == 2 ? "all"
@@ -2050,6 +2095,8 @@ namespace RhinoGhMcp
                     ["component_scope"] = scope,
                     ["category_filter"] = currentCategoryFilter,
                     ["plugin_version"] = PluginVersionString,
+                    ["scenario"] = currentScenario,
+                    ["active_skill"] = currentActiveSkill,
                 },
             };
         }
@@ -2646,6 +2693,207 @@ namespace RhinoGhMcp
 
             done.Wait(15000); // canvas rendering can take a moment on large definitions
             if (error != null) return ErrorResponse($"Error capturing canvas: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // ============================================================
+        // v0.2 — Coach-mode turn tracking + skill reference loading.
+        // ============================================================
+        //
+        // Turn tracking maps an AI response cycle (one round of begin_turn +
+        // bridge calls + end_turn) to the set of canvas GUIDs the AI touched
+        // during that cycle. The plan in v0.2.0 is text-only: we record state
+        // and surface it via end_turn's response so the AI can self-narrate
+        // ("What I changed this turn: ..."). Canvas-side visual highlighting
+        // is deferred to v0.2.x (TODO below).
+
+        // Active turn id, monotonic per-process. Long so wrap is impractical.
+        private static long currentTurnId = 0;
+        private static readonly object turnLock = new object();
+        // turnId -> set of GUIDs the AI touched during that turn.
+        private static Dictionary<long, HashSet<Guid>> turnChanges =
+            new Dictionary<long, HashSet<Guid>>();
+
+        // Public so the bridge handlers below — and v0.2.x highlight painter —
+        // can append to the active turn from any thread.
+        protected static void RecordTurnChange(Guid guid)
+        {
+            lock (turnLock)
+            {
+                if (currentTurnId == 0) return;
+                if (!turnChanges.TryGetValue(currentTurnId, out var set))
+                {
+                    set = new HashSet<Guid>();
+                    turnChanges[currentTurnId] = set;
+                }
+                set.Add(guid);
+            }
+        }
+
+        private JObject BeginTurn(JObject cmd)
+        {
+            lock (turnLock)
+            {
+                currentTurnId++;
+                if (!turnChanges.ContainsKey(currentTurnId))
+                    turnChanges[currentTurnId] = new HashSet<Guid>();
+                return SuccessResponse(new JObject
+                {
+                    ["turn_id"] = currentTurnId,
+                });
+            }
+        }
+
+        private JObject EndTurn(JObject cmd)
+        {
+            long turnId = (long?)cmd["turn_id"] ?? 0L;
+            lock (turnLock)
+            {
+                if (turnId == 0 || !turnChanges.TryGetValue(turnId, out var set))
+                {
+                    return SuccessResponse(new JObject
+                    {
+                        ["turn_id"] = turnId,
+                        ["changed_count"] = 0,
+                        ["changed_guids"] = new JArray(),
+                    });
+                }
+                var arr = new JArray();
+                foreach (var g in set)
+                    arr.Add(g.ToString());
+                // TODO(v0.2.x): paint highlight badges on every canvas object in `set`
+                // (teal stroke for "added", orange for "modified"). Needs IGH_Attributes
+                // override or a custom IGH_DrawHandler. For now the AI gets the change
+                // list and narrates it in chat — that satisfies the v0.2.0 Coach UX.
+                return SuccessResponse(new JObject
+                {
+                    ["turn_id"] = turnId,
+                    ["changed_count"] = set.Count,
+                    ["changed_guids"] = arr,
+                });
+            }
+        }
+
+        private JObject DismissHighlights(JObject cmd)
+        {
+            long? turnId = (long?)cmd["turn_id"];
+            lock (turnLock)
+            {
+                if (turnId == null || turnId == 0)
+                {
+                    int n = turnChanges.Count;
+                    turnChanges.Clear();
+                    return SuccessResponse(new JObject { ["cleared_turns"] = n });
+                }
+                turnChanges.Remove(turnId.Value);
+                return SuccessResponse(new JObject { ["cleared_turn"] = turnId.Value });
+            }
+        }
+
+        // Load a .gh definition (sent as base64-encoded bytes) and merge its
+        // components into the current canvas at an optional pivot. The Python
+        // tool gh_load_skill_reference reads the file off disk and sends it
+        // here; doing the file read server-side keeps the bridge protocol
+        // string-only and avoids cross-process file-path coupling.
+        private JObject LoadDefinitionFromBase64(JObject cmd)
+        {
+            string b64 = (string)cmd["data"];
+            float pivotX = (float?)cmd["pivot_x"] ?? 100f;
+            float pivotY = (float?)cmd["pivot_y"] ?? 100f;
+            if (string.IsNullOrEmpty(b64))
+                return ErrorResponse("`data` is required (base64-encoded .gh archive bytes).");
+
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(b64); }
+            catch (Exception ex) { return ErrorResponse($"Bad base64 payload: {ex.Message}"); }
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                string tmpPath = null;
+                try
+                {
+                    tmpPath = Path.Combine(Path.GetTempPath(), $"rhino-gh-mcp-skill-{Guid.NewGuid():N}.gh");
+                    File.WriteAllBytes(tmpPath, bytes);
+
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active Grasshopper document."); return; }
+
+                    var archive = new GH_IO.Serialization.GH_Archive();
+                    if (!archive.ReadFromFile(tmpPath))
+                    {
+                        result = ErrorResponse("Failed to parse .gh archive.");
+                        return;
+                    }
+
+                    // MergeWith places the archive's objects into the existing
+                    // doc — preferred over Open which replaces the document.
+                    var loaded = new GH_Document();
+                    if (!archive.ExtractObject(loaded, "Definition"))
+                    {
+                        result = ErrorResponse("Archive did not contain a 'Definition' root.");
+                        return;
+                    }
+
+                    int placedCount = loaded.ObjectCount;
+                    var placedGuids = new List<Guid>();
+                    var minPt = new System.Drawing.PointF(float.MaxValue, float.MaxValue);
+                    foreach (var obj in loaded.Objects)
+                    {
+                        if (obj.Attributes != null)
+                        {
+                            var p = obj.Attributes.Pivot;
+                            if (p.X < minPt.X) minPt = new System.Drawing.PointF(p.X, minPt.Y);
+                            if (p.Y < minPt.Y) minPt = new System.Drawing.PointF(minPt.X, p.Y);
+                        }
+                    }
+                    float dx = pivotX - (minPt.X == float.MaxValue ? 0 : minPt.X);
+                    float dy = pivotY - (minPt.Y == float.MaxValue ? 0 : minPt.Y);
+
+                    doc.MergeDocument(loaded, true, true);
+                    foreach (var obj in doc.Objects)
+                    {
+                        // Heuristic: anything we *just* merged still has the
+                        // original pivot from the archive. Translate by (dx,dy)
+                        // if it's part of the freshly loaded set. We keep a
+                        // reference list to know which ones to move.
+                    }
+                    // Simpler: iterate the loaded.Objects (which after MergeDocument
+                    // are the same instances now living in `doc`) and translate.
+                    foreach (var obj in loaded.Objects)
+                    {
+                        if (obj.Attributes != null)
+                        {
+                            var p = obj.Attributes.Pivot;
+                            obj.Attributes.Pivot = new System.Drawing.PointF(p.X + dx, p.Y + dy);
+                        }
+                        placedGuids.Add(obj.InstanceGuid);
+                        RecordTurnChange(obj.InstanceGuid);
+                    }
+                    doc.NewSolution(false);
+
+                    var arr = new JArray();
+                    foreach (var g in placedGuids) arr.Add(g.ToString());
+                    result = SuccessResponse(new JObject
+                    {
+                        ["loaded_count"] = placedCount,
+                        ["pivot_x"] = pivotX,
+                        ["pivot_y"] = pivotY,
+                        ["loaded_guids"] = arr,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally
+                {
+                    if (tmpPath != null) { try { File.Delete(tmpPath); } catch { } }
+                    done.Set();
+                }
+            });
+
+            done.Wait(30000);
+            if (error != null) return ErrorResponse($"Error loading definition: {error.Message}");
             return result ?? ErrorResponse("Operation timed out");
         }
     }

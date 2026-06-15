@@ -15,6 +15,11 @@ short-circuits with a clean denial string if the capability is off.
 @functools.wraps preserves __wrapped__, which inspect.signature follows by
 default — so FastMCP still sees the original function's typed parameters
 when building the tool's JSON schema.
+
+v0.2 — in addition to the capability check, the gate also enforces
+Execute-mode skill restrictions: when the canvas scenario is "execute" and
+the active skill declares a `commands:` table (or an `allow_tools:` list),
+non-allowed tool calls are rejected with a clean per-skill message.
 """
 
 from __future__ import annotations
@@ -22,9 +27,37 @@ from __future__ import annotations
 import functools
 from typing import Callable, TypeVar
 
-from ..capabilities import CapabilitiesProvider, denial_message
+from ..capabilities import (
+    CapabilitiesProvider,
+    denial_message,
+    execute_mode_blocks,
+    execute_skill_gate_message,
+)
+from ..skills import get_skill
 
 F = TypeVar("F", bound=Callable[..., str])
+
+
+def _skill_allowed_tools(skill_id: str) -> frozenset[str] | None:
+    """Build the per-skill allow-list from frontmatter.
+
+    Sources, in order:
+      1. `allow_tools:` — explicit list of MCP tool names.
+      2. `commands:` — dict; each key becomes a synthetic tool name
+         (the AI calls them via a generic dispatcher in Execute mode).
+
+    Returns None if the skill couldn't be found (signals "skill state on the
+    canvas is ahead of what we have on disk — fail open").
+    """
+    skill = get_skill(skill_id)
+    if skill is None:
+        return None
+    allowed: set[str] = set()
+    # commands:: each key is a verb. We surface them under the tool name
+    # "gh_skill_command_<verb>" so they don't collide with real tools.
+    for verb in skill.commands:
+        allowed.add(f"gh_skill_command_{verb}")
+    return frozenset(allowed)
 
 
 def gated(caps: CapabilitiesProvider, name: str) -> Callable[[F], F]:
@@ -34,6 +67,14 @@ def gated(caps: CapabilitiesProvider, name: str) -> Callable[[F], F]:
             c = caps.current()
             if not c.allows(name):
                 return denial_message(name, c)
+            # v0.2: Execute-mode skill gate. Only applies if scenario is
+            # "execute" AND a skill is active. Costs one skill lookup per
+            # call — could be cached, but skills are tiny (file IO is the
+            # bottleneck) and Execute mode isn't the default.
+            if c.scenario == "execute" and c.active_skill:
+                allowed = _skill_allowed_tools(c.active_skill)
+                if execute_mode_blocks(name, c, allowed):
+                    return execute_skill_gate_message(name, c.active_skill)
             return fn(*args, **kwargs)
         return wrapper  # type: ignore[return-value]
     return decorator

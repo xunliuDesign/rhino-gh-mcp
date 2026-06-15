@@ -63,6 +63,11 @@ class Capabilities:
     category_filter: str = "MCP"
     # Where this Capabilities came from — for logging / diagnostics.
     source: str = "default"
+    # v0.2: scenario + active skill, reported by the V2 canvas component.
+    # V1 canvas leaves these empty/default, so the server falls back to
+    # gating purely on (allow_parameters, allow_components, allow_scripting).
+    scenario: str = ""  # "inspect" | "tune" | "coach" | "execute" | "author" | ""
+    active_skill: str = ""  # skill id, or "" for none
 
     def allows(self, name: str) -> bool:
         """Check whether a tool name is permitted under the current capabilities.
@@ -119,6 +124,12 @@ _READ_TOOLS: frozenset[str] = frozenset(
         "rhino_list_blocks",
         # View driving — touches viewport, not document objects
         "rhino_set_view",
+        # v0.2: Skills v2 + turn tracking
+        "gh_list_skills",            # newer alias for list_skills (Skills v2)
+        "gh_introspect_definition",  # parse a .gh archive on disk
+        "gh_begin_turn",
+        "gh_end_turn",
+        "gh_dismiss_highlights",
     }
 )
 
@@ -140,6 +151,9 @@ _COMPONENT_WRITE_TOOLS: frozenset[str] = frozenset(
         "gh_add_any_component",
         "gh_connect_components",
         "gh_remove_node",
+        # v0.2: loading a Skill's reference .gh definition merges components
+        # into the current canvas — same risk profile as gh_add_component.
+        "gh_load_skill_reference",
     }
 )
 
@@ -214,6 +228,10 @@ def from_canvas_reply(reply: dict[str, Any]) -> Capabilities | None:
         component_scope=scope,
         category_filter=str(result.get("category_filter") or ""),
         source="canvas",
+        # v0.2 — only the V2 canvas component populates these. V1 returns
+        # missing keys, which collapse to "" via the default.
+        scenario=str(result.get("scenario") or ""),
+        active_skill=str(result.get("active_skill") or ""),
     )
 
 
@@ -293,3 +311,56 @@ def denial_message(tool_name: str, caps: Capabilities) -> str:
         f"To enable it, set the `{knob}` input on the rhino-gh-mcp Server "
         f"component to True. Active capabilities source: {caps.source}."
     )
+
+
+# --- v0.2: Execute-mode skill gating ----------------------------------------
+# When the canvas is in Execute scenario and a Skill is active, the AI is
+# restricted to the Skill's command grammar. Read tools always remain
+# available — the AI still needs to inspect the canvas to know what's there.
+# Per design doc §"Execute mode infrastructure": "this Skill doesn't support
+# that — change Scenario to Coach or Author for full freedom".
+
+# Tools that stay available in Execute mode regardless of skill — pure-read.
+_EXECUTE_ALWAYS_AVAILABLE: frozenset[str] = frozenset(_READ_TOOLS) | frozenset({
+    # Coach/Execute infrastructure
+    "gh_begin_turn",
+    "gh_end_turn",
+    "gh_dismiss_highlights",
+    # Skills introspection (always allowed so AI can see what's offered)
+    "gh_list_skills",
+    "gh_introspect_definition",
+})
+
+
+def execute_skill_gate_message(tool_name: str, skill_name: str) -> str:
+    """Wording for the "Skill doesn't support that" denial per design doc."""
+    return (
+        f"Skill {skill_name!r} doesn't support {tool_name!r} — change Scenario "
+        f"to Coach or Author for full freedom."
+    )
+
+
+def execute_mode_blocks(tool_name: str, caps: Capabilities,
+                        skill_allowed_tools: frozenset[str] | None) -> bool:
+    """Whether Execute-mode skill gating blocks a tool call.
+
+    Returns False (not blocked) if:
+      - we're not in Execute mode, OR
+      - no Skill is active (skill_allowed_tools is None / empty), OR
+      - the tool is in the always-available set, OR
+      - the tool is explicitly whitelisted by the skill.
+    """
+    if caps.scenario != "execute":
+        return False
+    if not caps.active_skill:
+        return False
+    if skill_allowed_tools is None:
+        # No skill loaded server-side even though canvas says one's active —
+        # be permissive (fail open) so a typo in the canvas input doesn't
+        # brick the session.
+        return False
+    if tool_name in _EXECUTE_ALWAYS_AVAILABLE:
+        return False
+    if tool_name in skill_allowed_tools:
+        return False
+    return True

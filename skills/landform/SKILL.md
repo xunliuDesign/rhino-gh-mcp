@@ -1,5 +1,6 @@
 ---
 name: landform
+version: 0.2.0
 description: |
   Build a parametric landform definition on a Grasshopper canvas using the
   bundled MCP landscape user-objects. Drives the LLM through the canonical
@@ -7,10 +8,13 @@ description: |
   chain. Best used when the user wants to design or iterate on a terrain
   surface, urban ground plane, garden topography, or any large mesh that
   needs to be sculpted by point/curve influence.
-recommended_capabilities:
+modes: [coach, execute]
+required_plugins: []
+required_capabilities:
   allow_parameters: true
   allow_components: true
   allow_scripting: false
+allowed_categories: [Curve, Surface, MCP, Vector, Math]
 recommended_scope: curated
 recommended_category_filter: "MCP"
 bundled_assets:

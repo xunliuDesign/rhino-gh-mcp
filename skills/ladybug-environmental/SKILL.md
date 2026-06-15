@@ -1,5 +1,6 @@
 ---
 name: ladybug-environmental
+version: 0.2.0
 description: |
   Drive basic environmental analysis on a Rhino site model using the
   Ladybug Tools Grasshopper plugin. Three canonical workflows: sun path
@@ -7,10 +8,13 @@ description: |
   from an EPW weather file. Use this skill when the user asks about
   daylight, solar access, wind direction, or general climate analysis
   for a site.
-recommended_capabilities:
+modes: [coach, execute]
+required_plugins: [ladybug]
+required_capabilities:
   allow_parameters: true
   allow_components: true
   allow_scripting: false
+allowed_categories: [Ladybug, Params, Sets, Curve, Surface, Vector]
 recommended_scope: defaults
 recommended_category_filter: "Ladybug, Params, Sets"
 prerequisites:
