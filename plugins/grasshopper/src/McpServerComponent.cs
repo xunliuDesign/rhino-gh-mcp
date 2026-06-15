@@ -14,6 +14,8 @@ using Rhino.Geometry;
 using Grasshopper.Kernel;
 using System.IO;
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.Reflection;
 using Grasshopper.Kernel.Types;
 
 namespace RhinoGhMcp
@@ -531,9 +533,20 @@ namespace RhinoGhMcp
                     case "set_value_list_selection":
                         result = SetValueListSelection(cmd);
                         break;
+                    case "set_expression_formula":
+                        result = SetExpressionFormula(cmd);
+                        break;
                     // v0.1.5: expose current capability state to the Python server.
                     case "get_capabilities":
                         result = GetCapabilities(cmd);
+                        break;
+                    // v0.1.7 diagnostic: introspect a component's runtime type
+                    // surface. Gated on AllowScripting via _scriptingCommands.
+                    case "inspect_type":
+                        result = InspectType(cmd);
+                        break;
+                    case "read_script_source":
+                        result = ReadScriptSource(cmd);
                         break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
@@ -571,6 +584,11 @@ namespace RhinoGhMcp
             bool bypassFilter = (bool?)(cmd["bypass_filter"] ?? false) ?? false;
             JObject result = null;
             Exception error = null;
+            // Bug 13 fix: shared cancel flag so that if the wait below times out,
+            // a late-running UI callback can detect it and roll back the placement
+            // instead of leaving a duplicate component on the canvas.
+            bool canceled = false;
+            object cancelLock = new object();
             var done = new System.Threading.ManualResetEventSlim(false);
 
             RunOnUiThread(() =>
@@ -635,10 +653,26 @@ namespace RhinoGhMcp
                     }
                     else
                     {
+                        // Bug 13 fix: if the caller has already timed out (canceled=true),
+                        // skip the placement entirely so we don't leave a phantom component.
+                        lock (cancelLock) { if (canceled) return; }
                         var comp = proxy.CreateInstance();
                         comp.CreateAttributes();
                         comp.Attributes.Pivot = new System.Drawing.PointF(x, y);
                         doc.AddObject(comp, false);
+                        // Re-check after AddObject: if the wait timed out while we were
+                        // placing, roll back so the caller's "Operation timed out" return
+                        // matches reality on the canvas.
+                        bool rolledBack = false;
+                        lock (cancelLock)
+                        {
+                            if (canceled)
+                            {
+                                doc.RemoveObject(comp, false);
+                                rolledBack = true;
+                            }
+                        }
+                        if (rolledBack) return;
                         result = new JObject { ["status"] = "success", ["result"] = $"Component '{proxy.Desc.Name}' added at ({x},{y}) in category '{proxy.Desc.Category}'" };
                     }
                 }
@@ -652,9 +686,17 @@ namespace RhinoGhMcp
                 }
             });
 
-            done.Wait(5000); // Wait up to 5 seconds
+            // Bug 13 fix: 15s gives proxy enumeration (~thousands of entries) headroom
+            // on slow machines; pair with the rollback above so a real timeout doesn't
+            // leak a placed component.
+            bool gotResponse = done.Wait(15000);
+            if (!gotResponse)
+            {
+                lock (cancelLock) { canceled = true; }
+                return ErrorResponse("Operation timed out (15s). The placement was canceled; canvas should be unchanged. Call gh_find_components before retrying to be safe.");
+            }
             if (error != null) return ErrorResponse($"Error adding component: {error.Message}");
-            return result ?? ErrorResponse("Operation timed out");
+            return result ?? ErrorResponse("Operation completed without result");
         }
         private JObject AddSliderToCanvas(JObject cmd)
         {
@@ -717,6 +759,8 @@ namespace RhinoGhMcp
                             all[comp.InstanceGuid.ToString()] = GetComponentInfo(comp);
                         else if (obj is IGH_Param param && param.Attributes?.Parent == null)
                             all[param.InstanceGuid.ToString()] = GetParamInfo(param, false, null, false);
+                        else if (obj is IGH_DocumentObject docObj)
+                            all[docObj.InstanceGuid.ToString()] = GetGenericObjectInfo(docObj);
                     }
                     result = new JObject { ["status"] = "success", ["result"] = all };
                 }
@@ -802,6 +846,8 @@ namespace RhinoGhMcp
                             all[comp.InstanceGuid.ToString()] = GetComponentInfo(comp);
                         else if (obj is IGH_Param param && param.Attributes?.Parent == null && set.Contains(param.InstanceGuid.ToString()))
                             all[param.InstanceGuid.ToString()] = GetParamInfo(param, false, null, false);
+                        else if (obj is IGH_DocumentObject docObj && set.Contains(docObj.InstanceGuid.ToString()))
+                            all[docObj.InstanceGuid.ToString()] = GetGenericObjectInfo(docObj);
                     }
                     result = new JObject { ["status"] = "success", ["result"] = all };
                 }
@@ -841,6 +887,8 @@ namespace RhinoGhMcp
                                 all[comp.InstanceGuid.ToString()] = GetComponentInfo(comp);
                             else if (obj is IGH_Param param && param.Attributes?.Parent == null)
                                 all[param.InstanceGuid.ToString()] = GetParamInfo(param, false, null, true);
+                            else if (obj is IGH_DocumentObject docObj)
+                                all[docObj.InstanceGuid.ToString()] = GetGenericObjectInfo(docObj);
                         }
                     }
                     result = new JObject { ["status"] = "success", ["result"] = all };
@@ -948,6 +996,10 @@ namespace RhinoGhMcp
             string srcOut = (string)cmd["source_output"];
             string tgtGuid = (string)cmd["target_guid"];
             string tgtIn = (string)cmd["target_input"];
+            // Bug 8 fix: when true, add this wire alongside existing sources instead
+            // of replacing them. Lets callers build multi-source merges (e.g. Loft
+            // from Project+Contour) without inserting an explicit Merge component.
+            bool append = (bool?)(cmd["append"] ?? false) ?? false;
             JObject result = null;
             Exception error = null;
             var done = new System.Threading.ManualResetEventSlim(false);
@@ -958,7 +1010,7 @@ namespace RhinoGhMcp
                 {
                     var doc = GetGHDocument();
                     var src = doc.FindObject(new Guid(srcGuid), true);
-                    var tgt = doc.FindObject(new Guid(tgtGuid), true) as IGH_Component;
+                    var tgt = doc.FindObject(new Guid(tgtGuid), true);
                     if (src == null || tgt == null)
                     {
                         result = new JObject { ["status"] = "error", ["result"] = "Source or target not found." };
@@ -967,15 +1019,38 @@ namespace RhinoGhMcp
                     IGH_Param srcParam = null;
                     if (src is GH_NumberSlider) srcParam = src as IGH_Param;
                     else if (src is IGH_Component sc) srcParam = sc.Params.Output.FirstOrDefault(p => p.NickName == srcOut || p.Name == srcOut);
-                    var tgtParam = tgt.Params.Input.FirstOrDefault(p => p.NickName == tgtIn || p.Name == tgtIn);
+                    else if (src is IGH_Param ip) srcParam = ip;
+                    IGH_Param tgtParam = null;
+                    if (tgt is IGH_Component tc) tgtParam = tc.Params.Input.FirstOrDefault(p => p.NickName == tgtIn || p.Name == tgtIn);
+                    else if (tgt is IGH_Param tp) tgtParam = tp;
                     if (srcParam == null || tgtParam == null)
                     {
                         result = new JObject { ["status"] = "error", ["result"] = "Params not found." };
                         return;
                     }
-                    while (tgtParam.Sources.Count > 0) tgtParam.RemoveSource(tgtParam.Sources[0]);
-                    tgtParam.AddSource(srcParam);
-                    result = new JObject { ["status"] = "success", ["result"] = "Connected." };
+                    // Bug 8 fix: when append=true, keep existing wires so this AddSource
+                    // adds to the merge instead of replacing. When false (default),
+                    // preserve the original replace-only semantics.
+                    if (!append)
+                    {
+                        while (tgtParam.Sources.Count > 0) tgtParam.RemoveSource(tgtParam.Sources[0]);
+                    }
+                    // Guard against accidentally creating a duplicate wire when the same
+                    // (source, target) pair is appended twice.
+                    if (!tgtParam.Sources.Contains(srcParam))
+                    {
+                        tgtParam.AddSource(srcParam);
+                    }
+                    result = new JObject
+                    {
+                        ["status"] = "success",
+                        ["result"] = new JObject
+                        {
+                            ["message"] = "Connected.",
+                            ["append"] = append,
+                            ["source_count"] = tgtParam.Sources.Count
+                        }
+                    };
                 }
                 catch (Exception ex)
                 {
@@ -1240,6 +1315,27 @@ namespace RhinoGhMcp
             if (error != null) return ErrorResponse($"Error getting component library: {error.Message}");
             return result ?? ErrorResponse("Operation timed out");
         }
+        // Bug 27 fix: serialize canvas objects that aren't IGH_Component or
+        // top-level IGH_Param (Galapagos solver, Gene Pool, other
+        // GH_ActiveObject-only classes). Without this, those objects are
+        // invisible to gh_get_context / gh_canvas_summary even though the
+        // user can see them on the canvas.
+        private JObject GetGenericObjectInfo(IGH_DocumentObject obj)
+        {
+            var o = new JObject();
+            o["instanceGuid"] = obj.InstanceGuid.ToString();
+            o["name"] = obj.Name ?? "";
+            o["nickName"] = obj.NickName ?? "";
+            o["description"] = obj.Description ?? "";
+            o["category"] = obj.Category ?? "";
+            o["subCategory"] = obj.SubCategory ?? "";
+            o["kind"] = obj.GetType().Name;
+            o["isSelected"] = obj.Attributes?.Selected ?? false;
+            o["isInput"] = false;
+            o["isOutput"] = false;
+            return o;
+        }
+
         private JObject GetComponentInfo(IGH_Component comp)
         {
             var o = new JObject();
@@ -1396,6 +1492,32 @@ namespace RhinoGhMcp
                         result = new JObject { ["status"] = "error", ["result"] = "Object not found." };
                         return;
                     }
+                    // Bug 2 fix: when the target is a Number Slider, move the slider
+                    // itself rather than wiring an orphan panel into its (empty) source list.
+                    // Mirrors the SetSliderRange pattern: clamp to range, ExpireSolution.
+                    if (obj is GH_NumberSlider slider)
+                    {
+                        if (!decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+                        {
+                            result = new JObject { ["status"] = "error", ["result"] = $"Value '{value}' is not a valid number for a Number Slider." };
+                            return;
+                        }
+                        if (parsed < slider.Slider.Minimum) parsed = slider.Slider.Minimum;
+                        if (parsed > slider.Slider.Maximum) parsed = slider.Slider.Maximum;
+                        slider.Slider.Value = parsed;
+                        slider.ExpireSolution(false);
+                        result = new JObject
+                        {
+                            ["status"] = "success",
+                            ["result"] = new JObject
+                            {
+                                ["instance_guid"] = guid,
+                                ["value"] = (double)slider.Slider.Value,
+                                ["mode"] = "slider"
+                            }
+                        };
+                        return;
+                    }
                     IGH_Param param = null;
                     if (obj is IGH_Component comp)
                     {
@@ -1409,6 +1531,72 @@ namespace RhinoGhMcp
                     if (param == null)
                     {
                         result = new JObject { ["status"] = "error", ["result"] = $"Parameter '{paramName}' not found." };
+                        return;
+                    }
+                    // Bug 7 fix: for typed inputs, write the value to PersistentData
+                    // directly instead of wiring an orphan panel. Unhandled types
+                    // (Param_GenericObject, Param_Point, etc.) and unparseable values
+                    // fall through to the panel-mode block below.
+                    string typedMode = null;
+                    switch (param)
+                    {
+                        case Param_Integer pi:
+                            if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var intVal))
+                            {
+                                param.RemoveAllSources();
+                                pi.PersistentData.Clear();
+                                pi.PersistentData.Append(new GH_Integer(intVal));
+                                typedMode = "integer";
+                            }
+                            break;
+                        case Param_Number pn:
+                            if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var dblVal))
+                            {
+                                param.RemoveAllSources();
+                                pn.PersistentData.Clear();
+                                pn.PersistentData.Append(new GH_Number(dblVal));
+                                typedMode = "number";
+                            }
+                            break;
+                        case Param_Boolean pb:
+                            if (TryParseBool(value, out var boolVal))
+                            {
+                                param.RemoveAllSources();
+                                pb.PersistentData.Clear();
+                                pb.PersistentData.Append(new GH_Boolean(boolVal));
+                                typedMode = "boolean";
+                            }
+                            break;
+                        case Param_String ps:
+                            param.RemoveAllSources();
+                            ps.PersistentData.Clear();
+                            ps.PersistentData.Append(new GH_String(value));
+                            typedMode = "string";
+                            break;
+                        case Param_Interval piv:
+                            if (TryParseInterval(value, out var iv))
+                            {
+                                param.RemoveAllSources();
+                                piv.PersistentData.Clear();
+                                piv.PersistentData.Append(new GH_Interval(iv));
+                                typedMode = "interval";
+                            }
+                            break;
+                    }
+                    if (typedMode != null)
+                    {
+                        param.ExpireSolution(false);
+                        result = new JObject
+                        {
+                            ["status"] = "success",
+                            ["result"] = new JObject
+                            {
+                                ["instance_guid"] = guid,
+                                ["param_name"] = paramName,
+                                ["value"] = value,
+                                ["mode"] = typedMode
+                            }
+                        };
                         return;
                     }
                     // v0.1.5+: panel mode is the only supported behavior.
@@ -1457,10 +1645,350 @@ namespace RhinoGhMcp
             return result ?? ErrorResponse("Operation timed out");
         }
 
+        // Bug 7 fix helpers — parse boolean / interval strings sent over the bridge.
+        private static bool TryParseBool(string raw, out bool result)
+        {
+            result = false;
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+            var s = raw.Trim();
+            if (bool.TryParse(s, out result)) return true;
+            if (s.Equals("1") || s.Equals("yes", StringComparison.OrdinalIgnoreCase) || s.Equals("on", StringComparison.OrdinalIgnoreCase)) { result = true; return true; }
+            if (s.Equals("0") || s.Equals("no", StringComparison.OrdinalIgnoreCase) || s.Equals("off", StringComparison.OrdinalIgnoreCase)) { result = false; return true; }
+            return false;
+        }
+
+        private static readonly string[] _intervalSeparators = new[] { " to ", "..", ",", ";", ":" };
+
+        private static bool TryParseInterval(string raw, out Interval result)
+        {
+            result = default;
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+            var s = raw.Trim();
+            // Try "a SEP b" forms first.
+            foreach (var sep in _intervalSeparators)
+            {
+                var idx = s.IndexOf(sep, StringComparison.OrdinalIgnoreCase);
+                if (idx <= 0) continue;
+                var left = s.Substring(0, idx).Trim();
+                var right = s.Substring(idx + sep.Length).Trim();
+                if (double.TryParse(left, NumberStyles.Float, CultureInfo.InvariantCulture, out var a) &&
+                    double.TryParse(right, NumberStyles.Float, CultureInfo.InvariantCulture, out var b))
+                {
+                    result = new Interval(a, b);
+                    return true;
+                }
+            }
+            // Single number → 0 to N (matches GH's implicit Number→Domain cast).
+            if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var n))
+            {
+                result = new Interval(0.0, n);
+                return true;
+            }
+            return false;
+        }
+
         private JObject ExecuteCode(JObject cmd)
         {
             // Not supported in C# context
             return ErrorResponse("execute_code is not supported in C# MCP server.");
+        }
+
+        // v0.1.7 diagnostic: dump the runtime type surface of a canvas object so
+        // we can discover the property names used by third-party / Rhino-8
+        // components (e.g. RhinoCodePluginGH.Components.ScriptComponent) without
+        // bundling reference assemblies.
+        private JObject InspectType(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), false);
+                    if (obj == null)
+                    {
+                        result = ErrorResponse($"No object with guid {guid}");
+                        return;
+                    }
+                    var t = obj.GetType();
+                    var props = new JArray();
+                    foreach (var p in t.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                    {
+                        var entry = new JObject
+                        {
+                            ["name"] = p.Name,
+                            ["type"] = p.PropertyType.FullName,
+                            ["canRead"] = p.CanRead,
+                            ["canWrite"] = p.CanWrite,
+                        };
+                        if (p.CanRead && p.GetIndexParameters().Length == 0)
+                        {
+                            try
+                            {
+                                var val = p.GetValue(obj, null);
+                                if (val == null) entry["value"] = null;
+                                else if (val is string || val is bool || val is int || val is long || val is double || val is float)
+                                {
+                                    string s = val.ToString();
+                                    entry["value"] = s.Length > 400 ? s.Substring(0, 400) + "..." : s;
+                                }
+                                else entry["valueType"] = val.GetType().FullName;
+                            }
+                            catch (Exception ex) { entry["readError"] = ex.GetType().Name + ": " + ex.Message; }
+                        }
+                        props.Add(entry);
+                    }
+                    var fields = new JArray();
+                    string probeFieldName = (string)cmd["probe_field"];
+                    JObject probeFieldResult = null;
+                    foreach (var f in t.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                                       .Concat(t.BaseType?.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic) ?? System.Linq.Enumerable.Empty<System.Reflection.FieldInfo>()))
+                    {
+                        var fEntry = new JObject
+                        {
+                            ["name"] = f.Name,
+                            ["type"] = f.FieldType.FullName,
+                            ["isPublic"] = f.IsPublic,
+                            ["declaredOn"] = f.DeclaringType?.FullName,
+                        };
+                        try
+                        {
+                            var fval = f.GetValue(obj);
+                            if (fval == null) fEntry["value"] = null;
+                            else if (fval is string || fval is bool || fval is int || fval is long || fval is double || fval is float || fval.GetType().IsEnum)
+                            {
+                                string s = fval.ToString();
+                                fEntry["value"] = s.Length > 400 ? s.Substring(0, 400) + "..." : s;
+                            }
+                            else fEntry["valueType"] = fval.GetType().FullName;
+
+                            if (probeFieldName != null && f.Name == probeFieldName && fval != null)
+                            {
+                                var ft = fval.GetType();
+                                var fprops = new JArray();
+                                foreach (var pp in ft.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                                {
+                                    var pe = new JObject
+                                    {
+                                        ["name"] = pp.Name,
+                                        ["type"] = pp.PropertyType.FullName,
+                                        ["canWrite"] = pp.CanWrite,
+                                    };
+                                    if (pp.CanRead && pp.GetIndexParameters().Length == 0)
+                                    {
+                                        try
+                                        {
+                                            var pv = pp.GetValue(fval, null);
+                                            if (pv == null) pe["value"] = null;
+                                            else if (pv is string || pv is bool || pv is int || pv is double || pv.GetType().IsEnum)
+                                            {
+                                                string s = pv.ToString();
+                                                pe["value"] = s.Length > 400 ? s.Substring(0, 400) + "..." : s;
+                                            }
+                                            else pe["valueType"] = pv.GetType().FullName;
+                                        }
+                                        catch (Exception ex) { pe["readError"] = ex.Message; }
+                                    }
+                                    fprops.Add(pe);
+                                }
+                                var fmethods = new JArray();
+                                foreach (var m in ft.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+                                {
+                                    if (m.IsSpecialName) continue;
+                                    var ps = new JArray();
+                                    foreach (var par in m.GetParameters()) ps.Add(par.ParameterType.FullName + " " + par.Name);
+                                    fmethods.Add(new JObject
+                                    {
+                                        ["name"] = m.Name,
+                                        ["returns"] = m.ReturnType.FullName,
+                                        ["params"] = ps,
+                                    });
+                                }
+                                probeFieldResult = new JObject
+                                {
+                                    ["type"] = ft.FullName,
+                                    ["assembly"] = ft.Assembly.GetName().Name,
+                                    ["baseType"] = ft.BaseType?.FullName,
+                                    ["interfaces"] = new JArray(ft.GetInterfaces().Select(i => (JToken)i.FullName)),
+                                    ["properties"] = fprops,
+                                    ["methods"] = fmethods,
+                                };
+                            }
+                        }
+                        catch (Exception ex) { fEntry["readError"] = ex.Message; }
+                        fields.Add(fEntry);
+                    }
+                    var methods = new JArray();
+                    foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                    {
+                        if (m.IsSpecialName) continue;
+                        var n = m.Name;
+                        // keep methods whose name suggests script/code/language manipulation, plus interface-implementations
+                        if (!(n.IndexOf("Code", StringComparison.OrdinalIgnoreCase) >= 0
+                              || n.IndexOf("Source", StringComparison.OrdinalIgnoreCase) >= 0
+                              || n.IndexOf("Script", StringComparison.OrdinalIgnoreCase) >= 0
+                              || n.IndexOf("Language", StringComparison.OrdinalIgnoreCase) >= 0
+                              || n.IndexOf("Spec", StringComparison.OrdinalIgnoreCase) >= 0
+                              || n.IndexOf("Text", StringComparison.OrdinalIgnoreCase) >= 0
+                              || n.IndexOf("Set", StringComparison.OrdinalIgnoreCase) >= 0))
+                            continue;
+                        var ps = new JArray();
+                        foreach (var par in m.GetParameters()) ps.Add(par.ParameterType.FullName + " " + par.Name);
+                        methods.Add(new JObject
+                        {
+                            ["name"] = m.Name,
+                            ["returns"] = m.ReturnType.FullName,
+                            ["params"] = ps,
+                            ["declaredOn"] = m.DeclaringType?.FullName,
+                        });
+                    }
+                    var interfaces = new JArray();
+                    foreach (var i in t.GetInterfaces()) interfaces.Add(i.FullName);
+                    result = new JObject
+                    {
+                        ["status"] = "success",
+                        ["result"] = new JObject
+                        {
+                            ["typeFullName"] = t.FullName,
+                            ["assembly"] = t.Assembly.GetName().Name,
+                            ["assemblyLocation"] = t.Assembly.Location,
+                            ["baseType"] = t.BaseType?.FullName,
+                            ["interfaces"] = interfaces,
+                            ["properties"] = props,
+                            ["fields"] = fields,
+                            ["methods_filtered"] = methods,
+                            ["probedField"] = probeFieldName,
+                            ["probedFieldResult"] = probeFieldResult,
+                        }
+                    };
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in InspectType: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // v0.1.7 diagnostic: read the script source from a Rhino 8
+        // ScriptComponent by reflection. Calls BaseScriptComponent<,>.TryGetSource.
+        private JObject ReadScriptSource(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), false);
+                    if (obj == null) { result = ErrorResponse($"No object with guid {guid}"); return; }
+                    var t = obj.GetType();
+                    var tryGet = FindMethod(t, "TryGetSource");
+                    var getSourceCode = FindMethod(t, "GetSourceCode");
+                    object[] args;
+                    string source = null;
+                    bool ok = false;
+                    string via = null;
+                    if (tryGet != null)
+                    {
+                        args = new object[] { null };
+                        var rv = tryGet.Invoke(obj, args);
+                        ok = rv is bool b && b;
+                        source = args[0] as string;
+                        via = "TryGetSource";
+                    }
+                    else if (getSourceCode != null)
+                    {
+                        source = getSourceCode.Invoke(obj, null) as string;
+                        ok = source != null;
+                        via = "GetSourceCode";
+                    }
+                    // also dump Context type/properties for visibility
+                    var ctxField = t.GetField("Context", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                                ?? t.BaseType?.GetField("Context", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    var ctx = ctxField?.GetValue(obj);
+                    JObject ctxInfo = null;
+                    if (ctx != null)
+                    {
+                        var ct = ctx.GetType();
+                        var cprops = new JArray();
+                        foreach (var p in ct.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                        {
+                            string val = null;
+                            try
+                            {
+                                var v = p.GetValue(ctx, null);
+                                if (v == null) val = "<null>";
+                                else if (v is string || v is bool || v is int || v is double || v.GetType().IsEnum) val = v.ToString();
+                                else val = "<" + v.GetType().FullName + ">";
+                            }
+                            catch (Exception ex) { val = "<err: " + ex.Message + ">"; }
+                            cprops.Add(new JObject
+                            {
+                                ["name"] = p.Name,
+                                ["type"] = p.PropertyType.FullName,
+                                ["canWrite"] = p.CanWrite,
+                                ["value"] = val,
+                            });
+                        }
+                        var cfields = new JArray();
+                        foreach (var f in ct.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic))
+                        {
+                            string val = null;
+                            try
+                            {
+                                var v = f.GetValue(ctx);
+                                if (v == null) val = "<null>";
+                                else if (v is string || v is bool || v is int || v is double || v.GetType().IsEnum) val = v.ToString();
+                                else val = "<" + v.GetType().FullName + ">";
+                            }
+                            catch (Exception ex) { val = "<err: " + ex.Message + ">"; }
+                            cfields.Add(new JObject { ["name"] = f.Name, ["type"] = f.FieldType.FullName, ["value"] = val });
+                        }
+                        ctxInfo = new JObject
+                        {
+                            ["type"] = ct.FullName,
+                            ["properties"] = cprops,
+                            ["fields"] = cfields,
+                        };
+                    }
+                    result = new JObject
+                    {
+                        ["status"] = "success",
+                        ["result"] = new JObject
+                        {
+                            ["readVia"] = via,
+                            ["ok"] = ok,
+                            ["source"] = source,
+                            ["context"] = ctxInfo,
+                        }
+                    };
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in ReadScriptSource: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        private static System.Reflection.MethodInfo FindMethod(Type t, string name)
+        {
+            for (var ty = t; ty != null; ty = ty.BaseType)
+            {
+                var m = ty.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly);
+                if (m != null) return m;
+            }
+            return null;
         }
 
         // v0.1.5: command-name -> capability-bucket mappings, used by
@@ -1471,6 +1999,7 @@ namespace RhinoGhMcp
             "set_slider_range",
             "set_toggle_value",
             "set_value_list_selection",
+            "set_expression_formula",
         };
         private static readonly HashSet<string> _componentWriteCommands = new HashSet<string>
         {
@@ -1484,6 +2013,8 @@ namespace RhinoGhMcp
             "update_script",
             "update_script_with_code_reference",
             "execute_code",
+            "inspect_type",
+            "read_script_source",
         };
 
         // Shared denial response - mirrors the wording from the Python
@@ -1809,6 +2340,83 @@ namespace RhinoGhMcp
 
             done.Wait(5000);
             if (error != null) return ErrorResponse($"Error getting panel content: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // ================================================================
+        // Bug 14 fix — write formula string to Expression / VariableExpression /
+        // Evaluate components. These store the formula as a [Property] on the
+        // component class, not as an input, so gh_set_component_parameter can't
+        // reach it. This handler walks public string properties for a writable
+        // "Expression" / "Formula" / "Function" match and sets it via reflection.
+        // ================================================================
+        private static readonly string[] _expressionFormulaPropertyNames = new[] { "Expression", "Formula", "Function" };
+
+        private JObject SetExpressionFormula(JObject cmd)
+        {
+            string guid = (string)cmd["instance_guid"];
+            string formula = (string)cmd["formula"];
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(guid))
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "instance_guid is required." };
+                        return;
+                    }
+                    if (formula == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "formula is required." };
+                        return;
+                    }
+                    var doc = GetGHDocument();
+                    var obj = doc.FindObject(new Guid(guid), true);
+                    if (obj == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Object not found." };
+                        return;
+                    }
+                    var type = obj.GetType();
+                    PropertyInfo propUsed = null;
+                    foreach (var candidate in _expressionFormulaPropertyNames)
+                    {
+                        var p = type.GetProperty(candidate, BindingFlags.Public | BindingFlags.Instance);
+                        if (p != null && p.PropertyType == typeof(string) && p.CanWrite)
+                        {
+                            p.SetValue(obj, formula);
+                            propUsed = p;
+                            break;
+                        }
+                    }
+                    if (propUsed == null)
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = $"Component '{type.Name}' has no writable string property named Expression/Formula/Function. This tool is for Expression, Variable Expression, and Evaluate components." };
+                        return;
+                    }
+                    if (obj is IGH_ActiveObject ao) ao.ExpireSolution(false);
+                    result = new JObject
+                    {
+                        ["status"] = "success",
+                        ["result"] = new JObject
+                        {
+                            ["instance_guid"] = guid,
+                            ["formula"] = formula,
+                            ["property"] = propUsed.Name,
+                            ["component"] = type.Name
+                        }
+                    };
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error setting expression formula: {error.Message}");
             return result ?? ErrorResponse("Operation timed out");
         }
 

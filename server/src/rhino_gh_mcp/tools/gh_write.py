@@ -206,6 +206,30 @@ def register(
         except BridgeError as exc:
             return f"Error: {exc}"
 
+    @app.tool(name="gh_set_expression_formula")
+    @gated(caps, "gh_set_expression_formula")
+    def gh_set_expression_formula(instance_guid: str, formula: str) -> str:
+        """Write the formula string on an Expression / Variable Expression / Evaluate component.
+
+        These components store the formula as a class property, not as a wired
+        input, so gh_set_component_parameter cannot reach it. This tool sets the
+        property directly via the bridge.
+
+        Args:
+            instance_guid: GUID of the Expression / Variable Expression / Evaluate component.
+            formula: Formula string, e.g. "x*y*12" or "sin(x)+cos(y)".
+        """
+        try:
+            return _result(
+                gh.send(
+                    "set_expression_formula",
+                    instance_guid=instance_guid,
+                    formula=formula,
+                )
+            )
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
     @app.tool(name="gh_set_slider_range")
     @gated(caps, "gh_set_slider_range")
     def gh_set_slider_range(
@@ -239,15 +263,21 @@ def register(
         source_output: str,
         target_guid: str,
         target_input: str,
+        append: bool = False,
     ) -> str:
-        """Connect a source output to a target input. Replaces any existing
-        wire on the target input.
+        """Connect a source output to a target input.
 
         Args:
             source_guid: GUID of the source component or slider.
             source_output: Output param name/nickname (use "" for sliders).
             target_guid: GUID of the target component.
             target_input: Input param name/nickname.
+            append: When False (default), replace any existing wire on the
+                target input — the original behavior. When True, add this
+                wire alongside existing sources so the target accumulates a
+                multi-source merge (e.g. Loft of Project+Contour, or a Merge
+                fed from multiple branches). Duplicate (source, target)
+                pairs are not re-added.
         """
         try:
             return _result(
@@ -257,6 +287,7 @@ def register(
                     source_output=source_output,
                     target_guid=target_guid,
                     target_input=target_input,
+                    append=append,
                 )
             )
         except BridgeError as exc:

@@ -129,6 +129,7 @@ _PARAMETER_WRITE_TOOLS: frozenset[str] = frozenset(
         "gh_select_value_list",
         "gh_set_component_parameter",
         "gh_set_slider_range",
+        "gh_set_expression_formula",
     }
 )
 
