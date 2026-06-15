@@ -78,3 +78,10 @@ logs/
 
 # Archive (kept locally, not pushed)
 _archive project/
+
+# Override (evaluated last): commit shipped install packages in dist/.
+# The plain .gha / .rhp build outputs above stay ignored.
+!dist/
+!dist/*.mcpb
+!dist/*.dxt
+!dist/*.yak

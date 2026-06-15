@@ -1,0 +1,22 @@
+---
+name: rhinogh-mcp-rhino
+version: 0.1.1
+authors:
+  - Xun Liu
+description: >
+  rhino-gh-mcp Rhino bridge (.rhp). Adds the _ToggleMcpService command so the
+  rhino-gh-mcp Python MCP server can read your Rhino document — layers,
+  selection, blocks, viewport — and run Rhino commands by name. Companion to
+  the rhinogh-mcp-grasshopper Grasshopper plugin and the Python MCP server
+  (Claude Desktop extension at github.com/xunliuDesign/rhino-gh-mcp). After
+  install, launch Rhino and run _ToggleMcpService to start the listener on
+  127.0.0.1:9876.
+url: "https://github.com/xunliuDesign/rhino-gh-mcp"
+icon: icon.png
+keywords:
+  - mcp
+  - llm
+  - ai
+  - claude
+  - automation
+  - rhino
