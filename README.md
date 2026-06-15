@@ -4,7 +4,7 @@
 > live Rhino 8 modeling session — for parametric design, architectural
 > research, and teaching.
 
-**Status**: v0.1.8 — Python MCP server, Grasshopper `.gha` plugin, and
+**Status**: v0.2.0 — Python MCP server, Grasshopper `.gha` plugin, and
 Rhino `.rhp` plugin all build clean and pass smoke tests on Mac and
 Windows. The capability gate, widget read/write, and first Skill
 (`landform`) are live. Two-click install via the
@@ -68,7 +68,7 @@ auto-installs from a local file.
 
 **2. Install the Python MCP server via the Desktop Extension.**
 
-Download `rhino-gh-mcp-0.1.8.mcpb` from the
+Download `rhino-gh-mcp-0.2.0.mcpb` from the
 [latest GitHub release](https://github.com/xunliuDesign/rhino-gh-mcp/releases)
 and **double-click it**. Claude Desktop opens the Extensions panel
 with the install prompt. Confirm. First launch downloads ~5 Python

@@ -26,6 +26,19 @@ bundled_assets:
   - "MCP_UserObjects_Landscape example/Noise Modifier.ghuser"
   - "MCP_UserObjects_Landscape example/Landform Render.ghuser"
   - "MCP_UserObjects_Landscape example/Vis Contour.ghuser"
+# Execute mode: only these real MCP tool names are unblocked when scenario=execute
+# AND active_skill=landform. Read tools are always allowed (no need to list).
+allow_tools:
+  - gh_add_component
+  - gh_add_slider
+  - gh_add_any_component
+  - gh_connect_components
+  - gh_set_slider
+  - gh_set_slider_range
+  - gh_set_component_parameter
+  - gh_remove_node
+  - gh_recompute
+  - rhino_set_view
 commands:
   build_default_hill:
     description: "Build the default circular-hill landform chain (BaseMesh -> Circle -> Grid Placer -> Absolute Modifier -> Render). Equivalent to the 'Worked example' below — useful for Execute mode where the user wants the canonical setup with no improvisation."

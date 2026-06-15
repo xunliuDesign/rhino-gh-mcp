@@ -52,6 +52,10 @@ def v2_skill_dir(tmp_path: Path) -> Path:
                 description: Generate panelisation
                 args: { surface: "Surface", divisions: int }
                 steps: [step1, step2]
+            allow_tools:
+              - gh_add_component
+              - gh_connect_components
+              - gh_set_slider
             ---
 
             # Body
@@ -115,6 +119,12 @@ def test_load_skills_parses_v2_frontmatter(v2_skill_dir: Path):
     assert len(s.reference_examples) == 2
     assert "panelize" in s.commands
     assert s.commands["panelize"]["description"] == "Generate panelisation"
+    # v0.2.0-beta: allow_tools is the Execute-mode real-tool allowlist.
+    assert s.allow_tools == (
+        "gh_add_component",
+        "gh_connect_components",
+        "gh_set_slider",
+    )
 
 
 def test_load_skills_legacy_skill_has_empty_v2_collections(v2_skill_dir: Path):

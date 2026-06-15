@@ -179,12 +179,17 @@ def register(app: FastMCP, gh: GrasshopperBridge, caps: CapabilitiesProvider,
     @app.tool(name="gh_end_turn")
     @gated(caps, "gh_end_turn")
     def gh_end_turn(turn_id: int = 0) -> str:
-        """End an AI turn. Returns a structured "what changed this turn" summary.
+        """End an AI turn. Returns a structured "what changed this turn" summary
+        AND triggers canvas-side highlight painting.
 
         Call this at the END of an AI response if you called gh_begin_turn.
-        In v0.2.0 the return is text-only — the AI is expected to weave it
-        into a "## What I changed in this turn" block in its reply. Canvas-
-        side highlight painting is a v0.2.x deliverable (TODO in the bridge).
+        The bridge will draw a 3 px teal ring around every component touched
+        during this turn — the user will see at a glance what the AI did.
+        Use this summary to also narrate "## What I changed in this turn"
+        in your text reply (per the Coach-mode prompt).
+
+        Highlights stay on the canvas until `gh_dismiss_highlights` is called
+        (with this turn_id or with 0 to clear all turns).
 
         Args:
             turn_id: turn id from gh_begin_turn. 0 = end the current turn.
@@ -204,10 +209,11 @@ def register(app: FastMCP, gh: GrasshopperBridge, caps: CapabilitiesProvider,
             "wired_pairs": list(state.wired_pairs) if state else [],
             "bridge_changed_count": bridge_summary.get("changed_count", 0),
             "bridge_changed_guids": bridge_summary.get("changed_guids", []),
-            "v020_note": (
-                "Text-only in v0.2.0 — canvas-side highlight badges are a "
-                "v0.2.x deliverable. End your reply with a 'What I changed "
-                "in this turn:' block listing the GUIDs above by purpose."
+            "note": (
+                "Canvas highlights are now visible — every component in "
+                "`bridge_changed_guids` is ringed in teal. Tell the user "
+                "what changed, then optionally call gh_dismiss_highlights "
+                "once they've acknowledged."
             ),
         }
         return json.dumps(out, indent=2, default=str)

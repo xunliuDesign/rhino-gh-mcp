@@ -21,6 +21,17 @@ prerequisites:
   - "Ladybug Tools must be installed in the user's Rhino (food4rhino / package manager)."
   - "An EPW weather file. The user can download one from epwmap.com or another EPW source."
   - "ComponentScope on the canvas must be set to 'defaults' (1) or 'all' (2), so Ladybug components are placeable."
+# Execute-mode allowlist — the raw tools the three canonical workflows need.
+allow_tools:
+  - gh_add_component
+  - gh_add_any_component
+  - gh_add_slider
+  - gh_connect_components
+  - gh_set_slider
+  - gh_set_slider_range
+  - gh_set_component_parameter
+  - gh_recompute
+  - rhino_set_view
 references:
   - https://docs.ladybug.tools/ladybug-primer/
   - https://github.com/ladybug-tools/ladybug-grasshopper

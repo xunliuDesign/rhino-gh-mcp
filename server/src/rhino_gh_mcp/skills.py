@@ -82,6 +82,12 @@ class Skill:
     images: dict[str, dict[str, Any]] = field(default_factory=dict)
     prompts: dict[str, str] = field(default_factory=dict)
     commands: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # v0.2 Execute-mode tool allowlist. When non-empty AND scenario=execute,
+    # the gate restricts the AI to these real MCP tool names (in addition to
+    # the always-available read tools). Use this to let a Skill expose the
+    # raw tools it actually needs (gh_add_component, gh_set_slider, ...)
+    # without waiting for FastMCP dynamic command-tool registration.
+    allow_tools: tuple[str, ...] = ()
     # Path to the SKILL.md so reference / image relative-path resolution works.
     path: Path | None = None
 
@@ -206,6 +212,7 @@ def _frontmatter_to_skill(fm: dict[str, Any], skill_md_path: Path,
         images={k: dict(v) for k, v in images_raw.items() if isinstance(v, dict)},
         prompts={str(k): str(v) for k, v in prompts_raw.items()},
         commands={str(k): dict(v) for k, v in commands_raw.items() if isinstance(v, dict)},
+        allow_tools=_coerce_str_tuple(fm.get("allow_tools")),
         path=skill_md_path,
     )
 
