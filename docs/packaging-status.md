@@ -1,7 +1,7 @@
-# Packaging status — v0.2.0
+# Packaging status — v0.2.1
 
 This page tracks the state of the two install channels we ship in
-v0.2.0: the `.mcpb` Desktop Extension (Claude Desktop) and the Yak
+v0.2.1: the `.mcpb` Desktop Extension (Claude Desktop) and the Yak
 packages (Rhino Package Manager).
 
 ## TL;DR
@@ -19,8 +19,8 @@ fresh release build:
 
 ```
 dist/
-├── rhino-gh-mcp-0.2.0.mcpb                           ~280 KB
-├── rhinogh-mcp-grasshopper-0.2.0-rh8_0-any.yak      ~600 KB
+├── rhino-gh-mcp-0.2.1.mcpb                           ~280 KB
+├── rhinogh-mcp-grasshopper-0.2.1-rh8_0-any.yak      ~600 KB
 └── rhinogh-mcp-rhino-0.1.1-rh8_0-any.yak            ~280 KB
 ```
 
@@ -35,7 +35,7 @@ install time).
 ### Bundle layout (open the .mcpb with any zip tool to inspect)
 
 ```
-rhino-gh-mcp-0.2.0.mcpb
+rhino-gh-mcp-0.2.1.mcpb
 ├── manifest.json              MCPB v0.3 manifest
 ├── icon.png
 ├── server/
@@ -112,7 +112,7 @@ against the Release-mode plugin outputs. The `yak build` invocation
 emits two warnings that are not fatal:
 
 ```
-WARNING: Content version doesn't match manifest: '0.2.0+<sha>' != '0.2.0'
+WARNING: Content version doesn't match manifest: '0.2.1+<sha>' != '0.2.1'
 WARNING: Content name doesn't match manifest: 'RhinoGhMcp' != 'rhinogh-mcp-grasshopper'
 ```
 
@@ -120,7 +120,7 @@ Both are intentional / unavoidable:
 
 - The version mismatch is because `dotnet` appends the git commit SHA to
   `AssemblyInformationalVersion` when building from a Git working tree.
-  The manifest version (`0.2.0`) is the source of truth that ships in
+  The manifest version (`0.2.1`) is the source of truth that ships in
   Package Manager.
 - The name mismatch is because the assembly is named `RhinoGhMcp` /
   `RhinoGhMcpRhino` (legacy C# identifier rules) while the Yak package
@@ -139,7 +139,7 @@ YAK="/Applications/Rhino 8.app/Contents/Resources/bin/yak"
 "$YAK" login
 
 # Push both packages.
-"$YAK" push dist/rhinogh-mcp-grasshopper-0.2.0-rh8_0-any.yak
+"$YAK" push dist/rhinogh-mcp-grasshopper-0.2.1-rh8_0-any.yak
 "$YAK" push dist/rhinogh-mcp-rhino-0.1.1-rh8_0-any.yak
 ```
 

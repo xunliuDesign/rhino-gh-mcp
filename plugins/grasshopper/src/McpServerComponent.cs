@@ -177,14 +177,28 @@ namespace RhinoGhMcp
             {
                 var asm = typeof(McpServerComponent).Assembly;
                 var name = asm.GetName();
+                string ver = name.Version != null
+                    ? TrimTrailingZeroParts(name.Version.ToString())
+                    : "0.0.0";
                 return string.Format("rhino-gh-mcp v{0} ({1})",
-                    name.Version != null ? name.Version.ToString() : "0.0.0",
-                    "https://github.com/xunliuDesign/rhino-gh-mcp");
+                    ver, "https://github.com/xunliuDesign/rhino-gh-mcp");
             }
             catch
             {
                 return "rhino-gh-mcp v? (https://github.com/xunliuDesign/rhino-gh-mcp)";
             }
+        }
+
+        // .NET assembly versions are always 4 parts (e.g. "0.2.0.0").
+        // Display the human semver form by trimming trailing ".0" parts,
+        // keeping at least major.minor.
+        private static string TrimTrailingZeroParts(string ver)
+        {
+            if (string.IsNullOrEmpty(ver)) return ver;
+            var parts = ver.Split('.');
+            int last = parts.Length - 1;
+            while (last > 1 && parts[last] == "0") last--;
+            return string.Join(".", parts, 0, last + 1);
         }
         /// <summary>
         /// The Exposure property controls where in the panel a component icon 

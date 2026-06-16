@@ -1,6 +1,8 @@
 using System;
+using System.Drawing;
 using System.Threading;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Special;
 
 namespace RhinoGhMcp
 {
@@ -251,14 +253,26 @@ namespace RhinoGhMcp
             {
                 var asm = typeof(McpServerComponentV2).Assembly;
                 var name = asm.GetName();
+                string ver = name.Version != null ? TrimTrailingZeros(name.Version.ToString()) : "0.0.0";
                 return string.Format("rhino-gh-mcp v{0} (v2 scenarios) ({1})",
-                    name.Version != null ? name.Version.ToString() : "0.0.0",
-                    "https://github.com/xunliuDesign/rhino-gh-mcp");
+                    ver, "https://github.com/xunliuDesign/rhino-gh-mcp");
             }
             catch
             {
                 return "rhino-gh-mcp v? (v2) (https://github.com/xunliuDesign/rhino-gh-mcp)";
             }
+        }
+
+        // Trim trailing ".0" parts so a .NET 4-part assembly version
+        // (e.g. "0.2.0.0") displays as the human-readable "0.2.0".
+        // Keeps at least major.minor.
+        private static string TrimTrailingZeros(string ver)
+        {
+            if (string.IsNullOrEmpty(ver)) return ver;
+            var parts = ver.Split('.');
+            int last = parts.Length - 1;
+            while (last > 1 && parts[last] == "0") last--;
+            return string.Join(".", parts, 0, last + 1);
         }
 
         /// <summary>
@@ -277,6 +291,58 @@ namespace RhinoGhMcp
                     return null;
                 }
             }
+        }
+
+        /// <summary>
+        /// Auto-wire helpers on a fresh drop from the ribbon: a Boolean Toggle
+        /// (Run, default False) and a Value List (Scenario, default Coach).
+        /// Only fires when no inputs have existing sources — this means file
+        /// loads, copy-pastes of fully connected groups, and undo redo don't
+        /// re-create the helpers.
+        /// </summary>
+        public override void AddedToDocument(GH_Document document)
+        {
+            base.AddedToDocument(document);
+
+            // Skip if any input already has a wired source — we're being
+            // restored from a .gh file or pasted with connections intact.
+            foreach (var input in Params.Input)
+            {
+                if (input.SourceCount > 0) return;
+            }
+
+            // Compute helper pivots relative to this component's position.
+            // Helpers sit to the LEFT and slightly above so they don't crowd
+            // the Advanced override inputs.
+            var pivot = Attributes.Pivot;
+            const float xOffset = -200f;
+
+            // 1. Boolean Toggle wired to Run (input 0). False so the server
+            //    doesn't auto-start until the user explicitly flips it.
+            var toggle = new GH_BooleanToggle();
+            toggle.NickName = "Run";
+            toggle.Value = false;
+            toggle.CreateAttributes();
+            toggle.Attributes.Pivot = new PointF(pivot.X + xOffset, pivot.Y - 30f);
+            document.AddObject(toggle, false);
+            Params.Input[0].AddSource(toggle);
+
+            // 2. Value List wired to Scenario (input 1). Default to Coach (2).
+            var valueList = new GH_ValueList();
+            valueList.NickName = "Scenario";
+            valueList.ListItems.Clear();
+            valueList.ListItems.Add(new GH_ValueListItem("Inspect (0)", "0"));
+            valueList.ListItems.Add(new GH_ValueListItem("Tune (1)", "1"));
+            valueList.ListItems.Add(new GH_ValueListItem("Coach (2)", "2"));
+            valueList.ListItems.Add(new GH_ValueListItem("Execute (3)", "3"));
+            valueList.ListItems.Add(new GH_ValueListItem("Author (4)", "4"));
+            valueList.SelectItem(2); // Coach by default
+            valueList.CreateAttributes();
+            valueList.Attributes.Pivot = new PointF(pivot.X + xOffset, pivot.Y + 10f);
+            document.AddObject(valueList, false);
+            Params.Input[1].AddSource(valueList);
+
+            ExpireSolution(false);
         }
 
         // --- Scenario helpers ----------------------------------------------
