@@ -430,6 +430,75 @@ def register(app: FastMCP, gh: GrasshopperBridge, caps: CapabilitiesProvider,
         except BridgeError as exc:
             return f"Error: {exc}"
 
+    # --- v0.2.4 fast outline tools --------------------------------------
+
+    @app.tool(name="gh_canvas_outline")
+    @gated(caps, "gh_canvas_outline")
+    def gh_canvas_outline() -> str:
+        """ULTRA-FAST canvas digest — use this FIRST when joining a session or analyzing a definition.
+
+        Returns the canvas split into wire-connected clusters with each
+        cluster's component-type histogram, bounding box, endpoints, and
+        input widgets. Designed to be ~1 KB for any reasonable canvas —
+        replaces the gh_get_context → 111k chars → subagent dispatch chain
+        for the "what's on this canvas / explain this definition" use case.
+
+        Format: short integer IDs (c1, c2, ...) for endpoint/input objects,
+        with a `guids` lookup table at the end. Drill into a cluster's
+        dataflow with gh_cluster_flow(cluster_id).
+        """
+        try:
+            return _result(gh.send("canvas_outline"))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_file_outline")
+    @gated(caps, "gh_file_outline")
+    def gh_file_outline(file_path: str) -> str:
+        """Read a .gh / .ghx file off disk and return the same outline structure
+        as gh_canvas_outline — WITHOUT polluting the current canvas.
+
+        Use this for "explain this downloaded file" workflows. The bridge
+        loads the archive into a temporary in-memory GH_Document, runs the
+        clustering, then disposes the temp doc. The user's canvas is never
+        touched. Works for both modern zip-format .gh and raw-XML .ghx.
+
+        Args:
+            file_path: Absolute path to a .gh or .ghx file.
+        """
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file():
+            return f"Error: file not found: {path}"
+        try:
+            data_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError as exc:
+            return f"Error: could not read {path}: {exc}"
+        try:
+            return _result(gh.send("file_outline", data=data_b64))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_cluster_flow")
+    @gated(caps, "gh_cluster_flow")
+    def gh_cluster_flow(cluster_id: int) -> str:
+        """Drill down into one cluster from the LAST outline call — returns its
+        stage-based dataflow (~300 chars even for large clusters).
+
+        Stages are topological levels inside the cluster: stage 1 = sources
+        (no in-cluster upstream), stage 2 = first transforms, ..., final
+        stage = endpoints. Each stage reports its component-type histogram
+        and any slider / toggle / value-list nicknames.
+
+        Args:
+            cluster_id: id returned by gh_canvas_outline or gh_file_outline.
+                Cache is process-local — call outline first in the same
+                MCP session.
+        """
+        try:
+            return _result(gh.send("cluster_flow", cluster_id=int(cluster_id)))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
     @app.tool(name="gh_organize_components")
     @gated(caps, "gh_organize_components")
     def gh_organize_components(instance_guids: list[str] | None = None,

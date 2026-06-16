@@ -132,6 +132,10 @@ _READ_TOOLS: frozenset[str] = frozenset(
         "gh_dismiss_highlights",
         # v0.2.3: read-side productivity tool — peek at a component output.
         "gh_get_component_output",
+        # v0.2.4: fast canvas outline tools — wire-graph clusters + drill-down.
+        "gh_canvas_outline",
+        "gh_file_outline",
+        "gh_cluster_flow",
     }
 )
 

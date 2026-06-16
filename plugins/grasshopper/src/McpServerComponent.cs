@@ -624,6 +624,17 @@ namespace RhinoGhMcp
                     case "organize_components":
                         result = OrganizeComponents(cmd);
                         break;
+                    // v0.2.4: ultra-compact outline tools for fast canvas
+                    // analysis without dumping wire-level JSON.
+                    case "canvas_outline":
+                        result = CanvasOutline(cmd);
+                        break;
+                    case "file_outline":
+                        result = FileOutlineFromBase64(cmd);
+                        break;
+                    case "cluster_flow":
+                        result = ClusterFlow(cmd);
+                        break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
                 }
@@ -801,7 +812,8 @@ namespace RhinoGhMcp
                     slider.Slider.DecimalPlaces = integer ? 0 : 2;
                     slider.Attributes.Pivot = new System.Drawing.PointF(x, y);
                     doc.AddObject(slider, false);
-                    result = new JObject { ["status"] = "success", ["result"] = $"Slider '{name}' added at ({x},{y})" };
+                    RecordTurnChange(slider.InstanceGuid);  // v0.2.4 bug fix
+                    result = new JObject { ["status"] = "success", ["result"] = $"Slider '{name}' added at ({x},{y})", ["instance_guid"] = slider.InstanceGuid.ToString() };
                 }
                 catch (Exception ex)
                 {
@@ -2952,12 +2964,19 @@ namespace RhinoGhMcp
 
                     int placedCount = loaded.ObjectCount;
                     var placedGuids = new List<Guid>();
+                    // v0.2.4 bug fix: snapshot GUIDs + original pivots BEFORE
+                    // MergeDocument moves the objects out of `loaded`. Without
+                    // this, the post-merge foreach over loaded.Objects is empty
+                    // and loaded_guids comes back as [] even on a 64-component
+                    // merge.
+                    var beforeMerge = new List<(Guid guid, System.Drawing.PointF originalPivot)>();
                     var minPt = new System.Drawing.PointF(float.MaxValue, float.MaxValue);
                     foreach (var obj in loaded.Objects)
                     {
+                        var p = obj.Attributes?.Pivot ?? new System.Drawing.PointF(0, 0);
+                        beforeMerge.Add((obj.InstanceGuid, p));
                         if (obj.Attributes != null)
                         {
-                            var p = obj.Attributes.Pivot;
                             if (p.X < minPt.X) minPt = new System.Drawing.PointF(p.X, minPt.Y);
                             if (p.Y < minPt.Y) minPt = new System.Drawing.PointF(minPt.X, p.Y);
                         }
@@ -2966,24 +2985,18 @@ namespace RhinoGhMcp
                     float dy = pivotY - (minPt.Y == float.MaxValue ? 0 : minPt.Y);
 
                     doc.MergeDocument(loaded, true, true);
-                    foreach (var obj in doc.Objects)
+
+                    // Walk by GUID (objects now live in `doc`, not `loaded`).
+                    foreach (var (guid, originalPivot) in beforeMerge)
                     {
-                        // Heuristic: anything we *just* merged still has the
-                        // original pivot from the archive. Translate by (dx,dy)
-                        // if it's part of the freshly loaded set. We keep a
-                        // reference list to know which ones to move.
-                    }
-                    // Simpler: iterate the loaded.Objects (which after MergeDocument
-                    // are the same instances now living in `doc`) and translate.
-                    foreach (var obj in loaded.Objects)
-                    {
-                        if (obj.Attributes != null)
+                        var obj = doc.FindObject(guid, false);
+                        if (obj?.Attributes != null)
                         {
-                            var p = obj.Attributes.Pivot;
-                            obj.Attributes.Pivot = new System.Drawing.PointF(p.X + dx, p.Y + dy);
+                            obj.Attributes.Pivot = new System.Drawing.PointF(
+                                originalPivot.X + dx, originalPivot.Y + dy);
                         }
-                        placedGuids.Add(obj.InstanceGuid);
-                        RecordTurnChange(obj.InstanceGuid);
+                        placedGuids.Add(guid);
+                        RecordTurnChange(guid);
                     }
                     doc.NewSolution(false);
 
@@ -3669,6 +3682,447 @@ namespace RhinoGhMcp
             });
             done.Wait(15000);
             if (error != null) return ErrorResponse($"Error in OrganizeComponents: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // ============================================================
+        // v0.2.4 — fast outline tools. Replace the multi-call discovery
+        // chain (gh_canvas_summary -> gh_get_context simplified -> 111k
+        // chars -> subagent fork) with one cheap server-side call that
+        // returns clusters + endpoints + inputs in ~1k chars.
+        //
+        // Cluster definition: connected components on the WIRE graph.
+        // Two canvas objects are in the same cluster iff any wire path
+        // (treating wires as undirected) connects them.
+        //
+        // Output format is intentionally short — JSON with short integer
+        // IDs ("c1", "c2") instead of 36-char GUIDs in the structural
+        // section, plus a single `guids` lookup table at the end. Type
+        // names are stripped of "GH_" / "Component_" / "Param_" prefixes
+        // and the trailing "Component" word.
+        // ============================================================
+
+        // Cache: cluster_id -> list of GUIDs. Updated by canvas_outline /
+        // file_outline, read by cluster_flow. Lives at the process level
+        // — sufficient since the AI's discovery flow is "outline then
+        // immediately drill down" within one conversation.
+        private static readonly Dictionary<int, List<Guid>> _outlineClusterCache =
+            new Dictionary<int, List<Guid>>();
+        private static GH_Document _outlineCacheDoc = null;
+        private static readonly object _outlineCacheLock = new object();
+
+        private static string ShortKind(IGH_DocumentObject obj)
+        {
+            if (obj == null) return "?";
+            string t = obj.GetType().Name;
+            if (t.StartsWith("GH_")) t = t.Substring(3);
+            else if (t.StartsWith("Component_")) t = t.Substring(10);
+            else if (t.StartsWith("Param_")) t = t.Substring(6);
+            if (t.EndsWith("Component") && t.Length > 9) t = t.Substring(0, t.Length - 9);
+            return t;
+        }
+
+        // Union-find for clustering by wire graph.
+        private class DSU
+        {
+            private readonly Dictionary<Guid, Guid> _parent = new Dictionary<Guid, Guid>();
+            public void Add(Guid g) { if (!_parent.ContainsKey(g)) _parent[g] = g; }
+            public Guid Find(Guid g)
+            {
+                if (!_parent.ContainsKey(g)) _parent[g] = g;
+                while (_parent[g] != g)
+                {
+                    _parent[g] = _parent[_parent[g]];
+                    g = _parent[g];
+                }
+                return g;
+            }
+            public void Union(Guid a, Guid b)
+            {
+                var ra = Find(a); var rb = Find(b);
+                if (ra != rb) _parent[ra] = rb;
+            }
+        }
+
+        // Walk wires, build DSU, return clusters as List<List<top-level object>>.
+        private static List<List<IGH_DocumentObject>> ComputeClusters(GH_Document doc)
+        {
+            var dsu = new DSU();
+            var byGuid = new Dictionary<Guid, IGH_DocumentObject>();
+            foreach (var obj in doc.Objects)
+            {
+                dsu.Add(obj.InstanceGuid);
+                byGuid[obj.InstanceGuid] = obj;
+            }
+
+            Guid TopGuidOf(IGH_Param p)
+            {
+                IGH_DocumentObject top = p;
+                var parent = p.Attributes?.Parent?.DocObject;
+                if (parent is IGH_DocumentObject d) top = d;
+                return top.InstanceGuid;
+            }
+
+            void UnionWires(IGH_Param param, Guid topGuid)
+            {
+                foreach (var src in param.Sources)
+                {
+                    var srcTopGuid = TopGuidOf(src);
+                    if (byGuid.ContainsKey(srcTopGuid))
+                        dsu.Union(topGuid, srcTopGuid);
+                }
+                foreach (var rec in param.Recipients)
+                {
+                    var dstTopGuid = TopGuidOf(rec);
+                    if (byGuid.ContainsKey(dstTopGuid))
+                        dsu.Union(topGuid, dstTopGuid);
+                }
+            }
+
+            foreach (var obj in doc.Objects)
+            {
+                if (obj is IGH_Component c)
+                {
+                    foreach (var p in c.Params.Input) UnionWires(p, c.InstanceGuid);
+                    foreach (var p in c.Params.Output) UnionWires(p, c.InstanceGuid);
+                }
+                else if (obj is IGH_Param p)
+                {
+                    UnionWires(p, p.InstanceGuid);
+                }
+            }
+
+            var groups = new Dictionary<Guid, List<IGH_DocumentObject>>();
+            foreach (var obj in doc.Objects)
+            {
+                var root = dsu.Find(obj.InstanceGuid);
+                if (!groups.TryGetValue(root, out var list))
+                {
+                    list = new List<IGH_DocumentObject>();
+                    groups[root] = list;
+                }
+                list.Add(obj);
+            }
+            return groups.Values
+                .OrderByDescending(g => g.Count)
+                .ToList();
+        }
+
+        // Build the compact outline JSON for a document.
+        private static JObject BuildOutline(GH_Document doc, List<List<IGH_DocumentObject>> clusters)
+        {
+            // Allocate short IDs only for endpoints + inputs (the only objects we
+            // surface by reference). Order: c1, c2, ... assigned on first emit.
+            var shortIds = new Dictionary<Guid, string>();
+            var guidsTable = new JObject();
+            string EnsureShortId(IGH_DocumentObject obj)
+            {
+                if (shortIds.TryGetValue(obj.InstanceGuid, out var sid)) return sid;
+                sid = "c" + (shortIds.Count + 1);
+                shortIds[obj.InstanceGuid] = sid;
+                guidsTable[sid] = obj.InstanceGuid.ToString();
+                return sid;
+            }
+
+            var clusterArr = new JArray();
+            int clusterId = 0;
+            foreach (var cluster in clusters)
+            {
+                clusterId++;
+                // Kinds histogram, top entries by count.
+                var kindCounts = new Dictionary<string, int>();
+                float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+                foreach (var obj in cluster)
+                {
+                    var k = ShortKind(obj);
+                    kindCounts[k] = kindCounts.TryGetValue(k, out var n) ? n + 1 : 1;
+                    var p = obj.Attributes?.Pivot;
+                    if (p.HasValue)
+                    {
+                        if (p.Value.X < minX) minX = p.Value.X;
+                        if (p.Value.Y < minY) minY = p.Value.Y;
+                        if (p.Value.X > maxX) maxX = p.Value.X;
+                        if (p.Value.Y > maxY) maxY = p.Value.Y;
+                    }
+                }
+                // Endpoints: components/params with no downstream consumer
+                // INSIDE this cluster. Limit to first 5.
+                var clusterGuids = new HashSet<Guid>(cluster.Select(o => o.InstanceGuid));
+                var endpoints = new JArray();
+                int epCount = 0;
+                foreach (var obj in cluster)
+                {
+                    if (epCount >= 5) break;
+                    bool hasDownstream = false;
+                    var outputs = new List<IGH_Param>();
+                    if (obj is IGH_Component cc) outputs.AddRange(cc.Params.Output);
+                    else if (obj is IGH_Param pp) outputs.Add(pp);
+                    foreach (var op in outputs)
+                    {
+                        foreach (var rec in op.Recipients)
+                        {
+                            var top = rec.Attributes?.Parent?.DocObject is IGH_DocumentObject d
+                                ? d.InstanceGuid : rec.InstanceGuid;
+                            if (clusterGuids.Contains(top) && top != obj.InstanceGuid)
+                            { hasDownstream = true; break; }
+                        }
+                        if (hasDownstream) break;
+                    }
+                    if (!hasDownstream && outputs.Count > 0)
+                    {
+                        endpoints.Add(new JObject
+                        {
+                            ["c"] = EnsureShortId(obj),
+                            ["k"] = ShortKind(obj),
+                        });
+                        epCount++;
+                    }
+                }
+                // Inputs: widgets (sliders / toggles / value-lists / panels). Limit 10.
+                var inputs = new JArray();
+                int inCount = 0;
+                foreach (var obj in cluster)
+                {
+                    if (inCount >= 10) break;
+                    if (obj is GH_NumberSlider || obj is GH_BooleanToggle
+                        || obj is GH_ValueList || obj is GH_Panel)
+                    {
+                        inputs.Add(new JObject
+                        {
+                            ["c"] = EnsureShortId(obj),
+                            ["k"] = ShortKind(obj),
+                            ["n"] = obj.NickName ?? "",
+                        });
+                        inCount++;
+                    }
+                }
+                var kindsArr = new JArray();
+                foreach (var kv in kindCounts.OrderByDescending(p => p.Value).Take(8))
+                {
+                    kindsArr.Add(new JArray { kv.Key, kv.Value });
+                }
+                clusterArr.Add(new JObject
+                {
+                    ["i"] = clusterId,
+                    ["size"] = cluster.Count,
+                    ["bbox"] = new JArray { minX, minY, maxX, maxY },
+                    ["kinds"] = kindsArr,
+                    ["ends"] = endpoints,
+                    ["ins"] = inputs,
+                });
+            }
+            return new JObject
+            {
+                ["v"] = 1,
+                ["n"] = doc.ObjectCount,
+                ["cn"] = clusters.Count,
+                ["clusters"] = clusterArr,
+                ["guids"] = guidsTable,
+            };
+        }
+
+        private static void UpdateClusterCache(GH_Document doc, List<List<IGH_DocumentObject>> clusters)
+        {
+            lock (_outlineCacheLock)
+            {
+                _outlineClusterCache.Clear();
+                _outlineCacheDoc = doc;
+                int id = 0;
+                foreach (var cluster in clusters)
+                {
+                    id++;
+                    _outlineClusterCache[id] = cluster.Select(o => o.InstanceGuid).ToList();
+                }
+            }
+        }
+
+        private JObject CanvasOutline(JObject cmd)
+        {
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var clusters = ComputeClusters(doc);
+                    UpdateClusterCache(doc, clusters);
+                    result = SuccessResponse(BuildOutline(doc, clusters));
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in CanvasOutline: {error.Message}");
+            return result ?? ErrorResponse("Outline timed out");
+        }
+
+        // file_outline — same shape as canvas_outline but operates on a
+        // .gh / .ghx file read off disk. The bridge loads it into a TEMP
+        // GH_Document (never added to the canvas, never solved), parses
+        // clusters, then disposes the temp doc.
+        private JObject FileOutlineFromBase64(JObject cmd)
+        {
+            string b64 = (string)cmd["data"];
+            if (string.IsNullOrEmpty(b64))
+                return ErrorResponse("`data` is required (base64-encoded .gh / .ghx bytes).");
+
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(b64); }
+            catch (Exception ex) { return ErrorResponse($"Bad base64 payload: {ex.Message}"); }
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                string tmpPath = null;
+                try
+                {
+                    tmpPath = Path.Combine(Path.GetTempPath(), $"rhino-gh-mcp-outline-{Guid.NewGuid():N}.gh");
+                    File.WriteAllBytes(tmpPath, bytes);
+
+                    var archive = new GH_IO.Serialization.GH_Archive();
+                    if (!archive.ReadFromFile(tmpPath))
+                    {
+                        result = ErrorResponse("Failed to parse .gh / .ghx archive.");
+                        return;
+                    }
+                    var tempDoc = new GH_Document();
+                    if (!archive.ExtractObject(tempDoc, "Definition"))
+                    {
+                        result = ErrorResponse("Archive did not contain a 'Definition' root.");
+                        return;
+                    }
+                    var clusters = ComputeClusters(tempDoc);
+                    UpdateClusterCache(tempDoc, clusters);
+                    result = SuccessResponse(BuildOutline(tempDoc, clusters));
+                }
+                catch (Exception ex) { error = ex; }
+                finally
+                {
+                    if (tmpPath != null) { try { File.Delete(tmpPath); } catch { } }
+                    done.Set();
+                }
+            });
+            done.Wait(20000);
+            if (error != null) return ErrorResponse($"Error in FileOutline: {error.Message}");
+            return result ?? ErrorResponse("Outline timed out");
+        }
+
+        // cluster_flow — given a cluster_id returned by the most recent
+        // outline call, return the stage-based dataflow inside that
+        // cluster. Stages = topological depth within the cluster.
+        private JObject ClusterFlow(JObject cmd)
+        {
+            int clusterId = (int?)cmd["cluster_id"] ?? 0;
+            if (clusterId <= 0)
+                return ErrorResponse("`cluster_id` (positive integer from a prior outline) is required.");
+
+            List<Guid> memberGuids;
+            GH_Document doc;
+            lock (_outlineCacheLock)
+            {
+                if (!_outlineClusterCache.TryGetValue(clusterId, out memberGuids))
+                    return ErrorResponse($"Unknown cluster_id {clusterId}. Call canvas_outline or file_outline first.");
+                doc = _outlineCacheDoc;
+            }
+            if (doc == null) return ErrorResponse("Cluster cache has no document; outline first.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var memberSet = new HashSet<Guid>(memberGuids);
+                    var members = new List<IGH_DocumentObject>();
+                    foreach (var g in memberGuids)
+                    {
+                        var o = doc.FindObject(g, false);
+                        if (o != null) members.Add(o);
+                    }
+                    // Compute stage = longest upstream path inside cluster.
+                    var depth = new Dictionary<Guid, int>();
+                    int ComputeDepth(IGH_DocumentObject o, HashSet<Guid> visiting)
+                    {
+                        if (depth.TryGetValue(o.InstanceGuid, out var d)) return d;
+                        if (!visiting.Add(o.InstanceGuid)) { depth[o.InstanceGuid] = 0; return 0; }
+                        int maxUp = -1;
+                        IEnumerable<IGH_Param> ins = new IGH_Param[0];
+                        if (o is IGH_Component cc) ins = cc.Params.Input;
+                        else if (o is IGH_Param pp) ins = new[] { pp };
+                        foreach (var p in ins)
+                        {
+                            foreach (var src in p.Sources)
+                            {
+                                var top = src.Attributes?.Parent?.DocObject is IGH_DocumentObject t
+                                    ? t.InstanceGuid : src.InstanceGuid;
+                                if (!memberSet.Contains(top)) continue;
+                                var so = doc.FindObject(top, false);
+                                if (so != null)
+                                    maxUp = Math.Max(maxUp, ComputeDepth(so, visiting));
+                            }
+                        }
+                        visiting.Remove(o.InstanceGuid);
+                        var v = maxUp + 1;
+                        depth[o.InstanceGuid] = v;
+                        return v;
+                    }
+                    foreach (var m in members) ComputeDepth(m, new HashSet<Guid>());
+
+                    // Group by depth; within each stage, count by kind.
+                    var byStage = members
+                        .GroupBy(o => depth[o.InstanceGuid])
+                        .OrderBy(g => g.Key);
+                    var stagesArr = new JArray();
+                    foreach (var stage in byStage)
+                    {
+                        var kindCount = new Dictionary<string, int>();
+                        var nicknames = new List<string>();
+                        foreach (var o in stage)
+                        {
+                            var k = ShortKind(o);
+                            kindCount[k] = kindCount.TryGetValue(k, out var n) ? n + 1 : 1;
+                            if (o is GH_NumberSlider || o is GH_BooleanToggle
+                                || o is GH_ValueList)
+                            {
+                                if (!string.IsNullOrEmpty(o.NickName) && nicknames.Count < 8)
+                                    nicknames.Add(o.NickName);
+                            }
+                        }
+                        var kindArr = new JArray();
+                        foreach (var kv in kindCount.OrderByDescending(p => p.Value))
+                            kindArr.Add(new JArray { kv.Key, kv.Value });
+                        var stageObj = new JObject
+                        {
+                            ["s"] = stage.Key,
+                            ["kinds"] = kindArr,
+                        };
+                        if (nicknames.Count > 0)
+                        {
+                            var ns = new JArray();
+                            foreach (var n in nicknames) ns.Add(n);
+                            stageObj["nicks"] = ns;
+                        }
+                        stagesArr.Add(stageObj);
+                    }
+                    result = SuccessResponse(new JObject
+                    {
+                        ["cluster_id"] = clusterId,
+                        ["member_count"] = members.Count,
+                        ["stage_count"] = stagesArr.Count,
+                        ["stages"] = stagesArr,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in ClusterFlow: {error.Message}");
             return result ?? ErrorResponse("Operation timed out");
         }
     }
