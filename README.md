@@ -4,13 +4,13 @@
 > live Rhino 8 modeling session — for parametric design, architectural
 > research, and teaching.
 
-**Status**: v0.2.1 — Python MCP server, Grasshopper `.gha` plugin, and
-Rhino `.rhp` plugin all build clean and pass smoke tests on Mac and
-Windows. The capability gate, widget read/write, and first Skill
-(`landform`) are live. Two-click install via the
-[`.mcpb` Desktop Extension](https://github.com/modelcontextprotocol/mcpb)
-(Claude Desktop) and [Yak packages](https://developer.rhino3d.com/guides/yak/)
-(Rhino Package Manager) ships in this release — see Quick start below.
+**Status**: v0.2.1 — five-Scenario canvas surface (Inspect / Tune /
+Coach / Execute / Author), Coach-mode canvas highlights, Skills v2
+schema with Execute-mode `allow_tools` gating, and auto-wired
+Toggle + Scenario value-list on component drop. Two-click install via
+the [`.mcpb` Desktop Extension](https://github.com/modelcontextprotocol/mcpb)
+for Claude Desktop and [Yak packages](https://developer.rhino3d.com/guides/yak/)
+for Rhino Package Manager. See Quick start below.
 
 ---
 
@@ -25,73 +25,85 @@ current layer"*. The LLM uses the tools below to read your canvas, place
 and wire Grasshopper components, change parameters, capture the viewport,
 and run Rhino commands.
 
-Three workflow modes ship in v1, all enforced on the **canvas** as
-visible component inputs (not hidden in a config file):
+v0.2 surfaces a single **Scenario** dropdown on the canvas component —
+pick what you're trying to do, the engine derives the underlying
+capability flags:
 
-| Canvas flag | What it gates |
-|---|---|
-| `AllowParameters` | The LLM can adjust sliders, toggles, value-lists, panels |
-| `AllowComponents` | The LLM can place, wire, and remove components |
-| `AllowScripting` | The LLM can write Python/C# script components and execute code |
-| `ComponentScope` (0/1/2) | When components are allowed: curated allow-list / GH defaults only / anything installed |
+| Scenario | What you're trying to do | What the AI can touch |
+|---|---|---|
+| **Inspect** | "Explain this definition to me" | Read only — no writes |
+| **Tune** | "Adjust the parameters I already have" | Sliders / toggles / value-lists |
+| **Coach** (default) | "Walk me through edits, show me what changed" | Tune + add curated components, with **canvas highlights** on every change |
+| **Execute** | "Follow a Skill recipe, no improvisation" | Only the tools the active Skill declares |
+| **Author** | "Free hands" | Full canvas + scripting |
 
-You can flip any of these mid-conversation; the change propagates within
-about 3 seconds. No restart.
+You can flip the Scenario mid-conversation; the change propagates within
+about 3 seconds. The v0.1 component is still in the ribbon as
+`rhino-gh-mcp Server (v1)` for backwards compatibility with saved `.gh`
+files that already use it.
 
-See [docs/architecture.md](docs/architecture.md) for the full picture and
-[docs/handoff.md](docs/handoff.md) for the current status / next steps.
+See [docs/architecture.md](docs/architecture.md) for the full picture,
+[docs/v0.2-redesign.md](docs/v0.2-redesign.md) for the Scenario design,
+and [docs/handoff.md](docs/handoff.md) for the current status.
 
 ---
 
-## Quick start — two clicks, no terminal
+## Quick start — three files, three clicks
 
 > For designers and architecture students. No `git clone`, no `uv`,
-> no `dotnet`. You need: Rhino 8 installed, Claude Desktop installed,
-> and Python 3.11+ on your PATH. About 5 minutes.
+> no `dotnet`. You need: **Rhino 8** installed, **Claude Desktop**
+> installed, and **Python 3.11+** on your PATH. About 5 minutes.
 
-**1. Install the Rhino + Grasshopper plugins via Rhino's Package Manager.**
+### Step 0 — Download these three files
 
-Launch Rhino 8 and run `_PackageManager` at the command line. Search
-for **rhino-gh-mcp**. Install both packages:
+Go to the [latest GitHub release](https://github.com/xunliuDesign/rhino-gh-mcp/releases/latest)
+and download the three artifacts (replace `0.2.1` with whatever the
+current release version is):
 
-- `rhinogh-mcp-grasshopper` — the Grasshopper canvas bridge (.gha)
-- `rhinogh-mcp-rhino` — the Rhino document bridge (.rhp)
+| File | What it is | Where it goes |
+|---|---|---|
+| `rhino-gh-mcp-0.2.1.mcpb` | Claude Desktop extension (Python MCP server bundled) | Claude Desktop |
+| `rhinogh-mcp-grasshopper-0.2.1-rh8_0-any.yak` | Grasshopper canvas plugin (`.gha`) | Rhino Package Manager |
+| `rhinogh-mcp-rhino-0.1.1-rh8_0-any.yak` | Rhino document plugin (`.rhp`) | Rhino Package Manager |
 
-Restart Rhino. The plugins are now available.
+That's everything you need on disk.
 
-If Package Manager search doesn't yet show the packages (the maintainer
-needs to `yak push` them — see [docs/packaging-status.md](docs/packaging-status.md)),
-download the `.yak` files from the
-[latest GitHub release](https://github.com/xunliuDesign/rhino-gh-mcp/releases)
-and drag each one onto an open Rhino window — Package Manager
-auto-installs from a local file.
+### Step 1 — Install the Rhino + Grasshopper plugins
 
-**2. Install the Python MCP server via the Desktop Extension.**
+Drag each `.yak` file onto an open Rhino 8 window. Rhino's Package
+Manager opens and installs the package — confirm the prompt. Do both
+files, then restart Rhino.
 
-Download `rhino-gh-mcp-0.2.1.mcpb` from the
-[latest GitHub release](https://github.com/xunliuDesign/rhino-gh-mcp/releases)
-and **double-click it**. Claude Desktop opens the Extensions panel
-with the install prompt. Confirm. First launch downloads ~5 Python
-dependencies into the extension directory (~30 seconds, one-time).
+*Alternatively*: once `yak push` is done (see
+[docs/packaging-status.md](docs/packaging-status.md)), run
+`_PackageManager` in Rhino and search **rhino-gh-mcp** to install
+both packages from the McNeel server.
 
-The extension surfaces the same four settings you'd get from the
-manual config: control level (`parameter` / `curated` / `full`),
-Grasshopper bridge port (default 9999), Rhino bridge port (default 9876),
-log level.
+### Step 2 — Install the Python MCP server in Claude Desktop
 
-**3. Bring up both bridges inside Rhino.**
+Double-click `rhino-gh-mcp-0.2.1.mcpb`. Claude Desktop opens the
+Extensions panel with the install prompt. Confirm. First launch
+pip-installs ~5 Python dependencies (~30 s, one-time).
+
+The extension surfaces four settings: control-level preset
+(`parameter` / `curated` / `full`), Grasshopper bridge port
+(default 9999), Rhino bridge port (default 9876), log level.
+
+### Step 3 — Bring up both bridges inside Rhino
 
 1. Run `_ToggleMcpService` in Rhino's command line. You should see
    *"rhino-gh-mcp: MCP service running on 127.0.0.1:9876"*.
 2. Open Grasshopper (`_Grasshopper`).
-3. Find the **MCP** tab → **Server** group → drop the
-   **rhino-gh-mcp Server (v1)** component on a fresh canvas.
-4. Right-click the `Run` input → set persistent data to `True` (or
-   wire a Boolean Toggle = True). `Status` should read
-   `Server On 127.0.0.1:9999`.
+3. Find the **MCP** ribbon tab → **Server** group → drop the
+   **rhino-gh-mcp Server (v2)** component on a fresh canvas.
+4. A **Boolean Toggle** (Run, off) and a **Value List**
+   (Scenario, Coach selected) appear auto-wired to the left — flip
+   the Toggle to **True** and `Status` should read
+   `Server On 127.0.0.1:9999 | Scenario: Coach | Skill: (none)`.
 
-**4. Restart Claude Desktop** so it picks up the new extension. Open
-a fresh chat and try:
+### Step 4 — Restart Claude Desktop and try a prompt
+
+Restart Claude Desktop so it picks up the extension. In a fresh chat:
 
 > Call `gh_status` and `rhino_status` to confirm both bridges are
 > alive, then `gh_canvas_summary` and `rhino_get_scene_info` to see
@@ -99,9 +111,38 @@ a fresh chat and try:
 > default 10, place a `Circle` component reading from that slider,
 > recompute, and capture the viewport so I can see the result.
 
-If both status checks succeed and a circle appears on your canvas,
-you're done — start asking the assistant for what you actually want
-to model.
+If both status checks succeed and a circle appears on the canvas,
+you're done.
+
+### Example prompts to get a feel for each Scenario
+
+Switch the Value List on the v2 component to the matching Scenario,
+then ask:
+
+**Coach** (the default — best for learning Grasshopper with an AI partner):
+> Bracket your work in a turn: call `gh_begin_turn` first. Build me
+> a parametric tower: a circular footprint with a radius slider, a
+> floor count slider, each floor a slab, and a twist angle slider.
+> When you're done call `gh_end_turn` so the components you added
+> light up on the canvas.
+
+**Execute** (set ActiveSkill = `landform` on the v2 component first):
+> Use the landform skill to build a single circular hill in the
+> middle of the canvas. Height around 30, radius around 60.
+
+**Tune** (no new components — just adjust what's there):
+> Walk through every slider on the canvas and tell me what it
+> controls, then bump each one by ~20 % and recompute so I can
+> see the effect.
+
+**Inspect** (no writes at all):
+> Explain this Grasshopper definition to me end-to-end — what does
+> each cluster of components do, where does the data flow, and
+> what would I change first to make the output less symmetric?
+
+**Author** (use only when you trust the AI to write code):
+> Write me a Python script component that takes a list of points
+> and returns the convex hull as a closed curve.
 
 ---
 
