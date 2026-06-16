@@ -599,6 +599,31 @@ namespace RhinoGhMcp
                     case "load_definition":
                         result = LoadDefinitionFromBase64(cmd);
                         break;
+                    // v0.2.3 productivity tools.
+                    case "bake_to_rhino":
+                        result = BakeToRhino(cmd);
+                        break;
+                    case "reference_rhino_object":
+                        result = ReferenceRhinoObject(cmd);
+                        break;
+                    case "add_panel":
+                        result = AddPanel(cmd);
+                        break;
+                    case "set_panel_content":
+                        result = SetPanelContent(cmd);
+                        break;
+                    case "get_component_output":
+                        result = GetComponentOutput(cmd);
+                        break;
+                    case "group_components":
+                        result = GroupComponents(cmd);
+                        break;
+                    case "move_component":
+                        result = MoveComponent(cmd);
+                        break;
+                    case "organize_components":
+                        result = OrganizeComponents(cmd);
+                        break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
                 }
@@ -2982,6 +3007,668 @@ namespace RhinoGhMcp
 
             done.Wait(30000);
             if (error != null) return ErrorResponse($"Error loading definition: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // ============================================================
+        // v0.2.3 — productivity tools: bake, reference, panel, group,
+        // move, organize, get-output. Each is a thin wrapper around the
+        // existing GH / Rhino APIs; the value-add is exposing them
+        // through the MCP surface so the AI can use them autonomously.
+        // ============================================================
+
+        /// <summary>
+        /// Bake a component's outputs into the active Rhino document.
+        /// Walks every output of the target component, asks each piece of
+        /// volatile data to bake itself via IGH_BakeAwareData, and returns
+        /// the list of Rhino GUIDs that landed in the doc.
+        /// </summary>
+        private JObject BakeToRhino(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            string layerName = (string)cmd["layer"];  // optional
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+
+                    var rhinoDoc = Rhino.RhinoDoc.ActiveDoc;
+                    if (rhinoDoc == null) { result = ErrorResponse("No active Rhino document."); return; }
+
+                    var attr = new Rhino.DocObjects.ObjectAttributes();
+                    if (!string.IsNullOrEmpty(layerName))
+                    {
+                        int layerIdx = rhinoDoc.Layers.FindByFullPath(layerName, -1);
+                        if (layerIdx < 0)
+                            layerIdx = rhinoDoc.Layers.Add(layerName, System.Drawing.Color.Black);
+                        if (layerIdx >= 0) attr.LayerIndex = layerIdx;
+                    }
+
+                    var bakedGuids = new List<Guid>();
+                    int errorCount = 0;
+
+                    // Path 1: component-level bake (preferred).
+                    if (obj is IGH_BakeAwareObject bakeObj)
+                    {
+                        bakeObj.BakeGeometry(rhinoDoc, attr, bakedGuids);
+                    }
+                    // Path 2: walk outputs, bake each goo individually.
+                    else if (obj is IGH_Component comp)
+                    {
+                        foreach (var output in comp.Params.Output)
+                        {
+                            foreach (var goo in output.VolatileData.AllData(true))
+                            {
+                                if (goo is IGH_BakeAwareData bakeGoo)
+                                {
+                                    try
+                                    {
+                                        if (bakeGoo.BakeGeometry(rhinoDoc, attr, out var bg))
+                                            bakedGuids.Add(bg);
+                                    }
+                                    catch { errorCount++; }
+                                }
+                            }
+                        }
+                    }
+                    else if (obj is IGH_Param param)
+                    {
+                        foreach (var goo in param.VolatileData.AllData(true))
+                        {
+                            if (goo is IGH_BakeAwareData bakeGoo)
+                            {
+                                try
+                                {
+                                    if (bakeGoo.BakeGeometry(rhinoDoc, attr, out var bg))
+                                        bakedGuids.Add(bg);
+                                }
+                                catch { errorCount++; }
+                            }
+                        }
+                    }
+
+                    if (bakedGuids.Count > 0) rhinoDoc.Views.Redraw();
+
+                    var arr = new JArray();
+                    foreach (var g in bakedGuids) arr.Add(g.ToString());
+                    result = SuccessResponse(new JObject
+                    {
+                        ["baked_count"] = bakedGuids.Count,
+                        ["baked_rhino_guids"] = arr,
+                        ["layer"] = layerName ?? rhinoDoc.Layers.CurrentLayer.FullPath,
+                        ["error_count"] = errorCount,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(15000);
+            if (error != null) return ErrorResponse($"Error in BakeToRhino: {error.Message}");
+            return result ?? ErrorResponse("Bake timed out");
+        }
+
+        /// <summary>
+        /// Drop a Curve / Brep / Mesh / Point / Surface / Geometry param on
+        /// the GH canvas with persistent data referencing a Rhino object by
+        /// GUID. This is the "right-click → Set one Curve" workflow exposed
+        /// to the AI. Type is auto-detected from the Rhino object's geometry.
+        /// </summary>
+        private JObject ReferenceRhinoObject(JObject cmd)
+        {
+            string rhinoGuidStr = (string)cmd["rhino_guid"];
+            float x = (float?)cmd["x"] ?? 100f;
+            float y = (float?)cmd["y"] ?? 100f;
+            if (string.IsNullOrEmpty(rhinoGuidStr))
+                return ErrorResponse("`rhino_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var rhinoDoc = Rhino.RhinoDoc.ActiveDoc;
+                    if (rhinoDoc == null) { result = ErrorResponse("No active Rhino document."); return; }
+
+                    Guid rhinoGuid = new Guid(rhinoGuidStr);
+                    var rhinoObj = rhinoDoc.Objects.Find(rhinoGuid);
+                    if (rhinoObj == null) { result = ErrorResponse($"No Rhino object with guid {rhinoGuidStr}"); return; }
+
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+
+                    // Determine the right param type for this Rhino geometry.
+                    string paramType;
+                    IGH_Param param;
+                    var geom = rhinoObj.Geometry;
+                    if (geom is Rhino.Geometry.Curve)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Curve();
+                        var goo = new Grasshopper.Kernel.Types.GH_Curve();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Curve";
+                    }
+                    else if (geom is Rhino.Geometry.Brep)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Brep();
+                        var goo = new Grasshopper.Kernel.Types.GH_Brep();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Brep";
+                    }
+                    else if (geom is Rhino.Geometry.Mesh)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Mesh();
+                        var goo = new Grasshopper.Kernel.Types.GH_Mesh();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Mesh";
+                    }
+                    else if (geom is Rhino.Geometry.Surface)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Surface();
+                        var goo = new Grasshopper.Kernel.Types.GH_Surface();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Surface";
+                    }
+                    else if (geom is Rhino.Geometry.Point)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Point();
+                        var pt = ((Rhino.Geometry.Point)geom).Location;
+                        var goo = new Grasshopper.Kernel.Types.GH_Point(pt);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Point";
+                    }
+                    else
+                    {
+                        // Fallback: unrecognized geometry kind. Drop a generic
+                        // Geometry param without persistent data — caller can
+                        // right-click → "Set one Geometry" to attach the ref.
+                        var p = new Grasshopper.Kernel.Parameters.Param_Geometry();
+                        param = p; paramType = geom?.GetType().Name ?? "Geometry";
+                    }
+
+                    param.NickName = rhinoObj.Name?.Trim();
+                    if (string.IsNullOrEmpty(param.NickName)) param.NickName = paramType;
+                    param.CreateAttributes();
+                    param.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                    doc.AddObject(param, false);
+                    RecordTurnChange(param.InstanceGuid);
+
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = param.InstanceGuid.ToString(),
+                        ["param_type"] = paramType,
+                        ["rhino_guid"] = rhinoGuidStr,
+                        ["x"] = x,
+                        ["y"] = y,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in ReferenceRhinoObject: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Add a Grasshopper Panel at (x, y) with the given text content.
+        /// Useful for the AI to leave inline notes / labels next to its work.
+        /// </summary>
+        private JObject AddPanel(JObject cmd)
+        {
+            string text = (string)cmd["text"] ?? "";
+            float x = (float?)cmd["x"] ?? 100f;
+            float y = (float?)cmd["y"] ?? 100f;
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var panel = new Grasshopper.Kernel.Special.GH_Panel();
+                    panel.UserText = text;
+                    panel.Properties.Multiline = text.Contains("\n");
+                    panel.CreateAttributes();
+                    panel.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                    doc.AddObject(panel, false);
+                    RecordTurnChange(panel.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = panel.InstanceGuid.ToString(),
+                        ["x"] = x,
+                        ["y"] = y,
+                        ["text_length"] = text.Length,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in AddPanel: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Change the text on an existing Panel.
+        /// </summary>
+        private JObject SetPanelContent(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            string text = (string)cmd["text"] ?? "";
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+                    if (!(obj is Grasshopper.Kernel.Special.GH_Panel panel))
+                        return; // Will fall through to error below.
+                    panel.UserText = text;
+                    panel.Properties.Multiline = text.Contains("\n");
+                    panel.ExpireSolution(false);
+                    RecordTurnChange(panel.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = guidStr,
+                        ["text_length"] = text.Length,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in SetPanelContent: {error.Message}");
+            return result ?? ErrorResponse("Object is not a Panel, or operation timed out");
+        }
+
+        /// <summary>
+        /// Read the volatile data on a component's output. Returns a
+        /// data-tree summary (path + flattened value strings per branch).
+        /// Used by the AI to explain what a component is actually producing.
+        /// </summary>
+        private JObject GetComponentOutput(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            string outputName = (string)cmd["output_name"];  // optional; first output if missing
+            int maxItems = (int?)cmd["max_items"] ?? 100;
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+
+                    IGH_Param outputParam = null;
+                    if (obj is IGH_Component comp)
+                    {
+                        if (comp.Params.Output.Count == 0)
+                        {
+                            result = ErrorResponse("Component has no outputs.");
+                            return;
+                        }
+                        if (!string.IsNullOrEmpty(outputName))
+                        {
+                            outputParam = comp.Params.Output.FirstOrDefault(
+                                p => p.Name == outputName || p.NickName == outputName);
+                            if (outputParam == null)
+                            {
+                                result = ErrorResponse(
+                                    $"No output named {outputName}. Available: " +
+                                    string.Join(", ", comp.Params.Output.Select(p => p.NickName)));
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            outputParam = comp.Params.Output[0];
+                        }
+                    }
+                    else if (obj is IGH_Param p)
+                    {
+                        outputParam = p;
+                    }
+                    else
+                    {
+                        result = ErrorResponse("Object has no readable output.");
+                        return;
+                    }
+
+                    var data = outputParam.VolatileData;
+                    var branches = new JArray();
+                    int totalItems = 0;
+                    int branchCount = data.PathCount;
+                    for (int b = 0; b < branchCount && totalItems < maxItems; b++)
+                    {
+                        var path = data.get_Path(b);
+                        var branch = data.get_Branch(b);
+                        var items = new JArray();
+                        foreach (var goo in branch)
+                        {
+                            if (totalItems >= maxItems) break;
+                            items.Add(goo?.ToString() ?? "null");
+                            totalItems++;
+                        }
+                        branches.Add(new JObject
+                        {
+                            ["path"] = path.ToString(),
+                            ["count"] = branch.Count,
+                            ["values"] = items,
+                        });
+                    }
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = guidStr,
+                        ["output_name"] = outputParam.NickName,
+                        ["output_type"] = outputParam.TypeName,
+                        ["branch_count"] = branchCount,
+                        ["item_count"] = data.DataCount,
+                        ["truncated"] = totalItems >= maxItems && data.DataCount > maxItems,
+                        ["branches"] = branches,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in GetComponentOutput: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Wrap a list of components in a Grasshopper Group (visual cluster
+        /// with an optional nickname and color). Sees the standard Group
+        /// rectangle on the canvas.
+        /// </summary>
+        private JObject GroupComponents(JObject cmd)
+        {
+            var guidsArr = cmd["instance_guids"] as JArray;
+            if (guidsArr == null || guidsArr.Count == 0)
+                return ErrorResponse("`instance_guids` (array) is required.");
+            string nickname = (string)cmd["nickname"] ?? "Group";
+            string colorHex = (string)cmd["color"];
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var group = new Grasshopper.Kernel.Special.GH_Group();
+                    group.NickName = nickname;
+                    int added = 0;
+                    foreach (var token in guidsArr)
+                    {
+                        var s = token?.ToString();
+                        if (string.IsNullOrEmpty(s)) continue;
+                        try
+                        {
+                            var g = new Guid(s);
+                            group.AddObject(g);
+                            added++;
+                        }
+                        catch { /* skip invalid */ }
+                    }
+                    if (!string.IsNullOrEmpty(colorHex))
+                    {
+                        try
+                        {
+                            var c = System.Drawing.ColorTranslator.FromHtml(colorHex);
+                            group.Colour = c;
+                        }
+                        catch { /* keep default */ }
+                    }
+                    group.CreateAttributes();
+                    doc.AddObject(group, false);
+                    group.ExpireCaches();
+                    RecordTurnChange(group.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = group.InstanceGuid.ToString(),
+                        ["nickname"] = nickname,
+                        ["members"] = added,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in GroupComponents: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Move a canvas object to a new pivot. Lightweight — single
+        /// component, single point. For layout-wide tidying use organize.
+        /// </summary>
+        private JObject MoveComponent(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            float x = (float?)cmd["x"] ?? 0f;
+            float y = (float?)cmd["y"] ?? 0f;
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj?.Attributes == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+                    obj.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                    obj.Attributes.ExpireLayout();
+                    Grasshopper.Instances.ActiveCanvas?.Refresh();
+                    RecordTurnChange(obj.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = guidStr,
+                        ["x"] = x,
+                        ["y"] = y,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in MoveComponent: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Auto-layout components left → right by data-flow depth. Depth is
+        /// the longest path from a "source" (no in-set predecessors) to the
+        /// component. Components at the same depth stack vertically.
+        ///
+        /// Accepts an explicit `instance_guids` list to layout, or omits it
+        /// to layout every component on the canvas. Components NOT in the
+        /// set are ignored when computing depth (their positions stay put).
+        /// </summary>
+        private JObject OrganizeComponents(JObject cmd)
+        {
+            var guidsArr = cmd["instance_guids"] as JArray;
+            float startX = (float?)cmd["start_x"] ?? 100f;
+            float startY = (float?)cmd["start_y"] ?? 100f;
+            float colWidth = (float?)cmd["column_width"] ?? 250f;
+            float rowHeight = (float?)cmd["row_height"] ?? 110f;
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+
+                    // Collect the target set.
+                    var targets = new Dictionary<Guid, IGH_DocumentObject>();
+                    if (guidsArr != null && guidsArr.Count > 0)
+                    {
+                        foreach (var token in guidsArr)
+                        {
+                            var s = token?.ToString();
+                            if (string.IsNullOrEmpty(s)) continue;
+                            try
+                            {
+                                var g = new Guid(s);
+                                var o = doc.FindObject(g, false);
+                                if (o != null) targets[g] = o;
+                            }
+                            catch { }
+                        }
+                    }
+                    else
+                    {
+                        foreach (var o in doc.Objects) targets[o.InstanceGuid] = o;
+                    }
+                    if (targets.Count == 0)
+                    {
+                        result = ErrorResponse("No target objects to organize.");
+                        return;
+                    }
+
+                    // Compute depth via memoized DFS.
+                    var depth = new Dictionary<Guid, int>();
+                    int ComputeDepth(IGH_DocumentObject o, HashSet<Guid> visiting)
+                    {
+                        if (depth.TryGetValue(o.InstanceGuid, out var d)) return d;
+                        if (!visiting.Add(o.InstanceGuid))
+                        {
+                            // Cycle — bail out at current depth 0.
+                            depth[o.InstanceGuid] = 0;
+                            return 0;
+                        }
+                        int maxUpstream = -1;
+                        if (o is IGH_Component cc)
+                        {
+                            foreach (var input in cc.Params.Input)
+                            {
+                                foreach (var src in input.Sources)
+                                {
+                                    IGH_DocumentObject srcObj = src;
+                                    // If the source is a sub-param of a component, walk up.
+                                    if (src.Attributes?.GetTopLevel?.DocObject is IGH_DocumentObject top)
+                                        srcObj = top;
+                                    if (srcObj == null) continue;
+                                    if (!targets.ContainsKey(srcObj.InstanceGuid)) continue;
+                                    maxUpstream = Math.Max(maxUpstream, ComputeDepth(srcObj, visiting));
+                                }
+                            }
+                        }
+                        else if (o is IGH_Param pp)
+                        {
+                            foreach (var src in pp.Sources)
+                            {
+                                IGH_DocumentObject srcObj = src;
+                                if (src.Attributes?.GetTopLevel?.DocObject is IGH_DocumentObject top)
+                                    srcObj = top;
+                                if (srcObj == null) continue;
+                                if (!targets.ContainsKey(srcObj.InstanceGuid)) continue;
+                                maxUpstream = Math.Max(maxUpstream, ComputeDepth(srcObj, visiting));
+                            }
+                        }
+                        visiting.Remove(o.InstanceGuid);
+                        var result = maxUpstream + 1;
+                        depth[o.InstanceGuid] = result;
+                        return result;
+                    }
+
+                    foreach (var o in targets.Values)
+                        ComputeDepth(o, new HashSet<Guid>());
+
+                    // Group by depth, sort each column by current y for stability.
+                    var byDepth = new Dictionary<int, List<IGH_DocumentObject>>();
+                    foreach (var kv in depth)
+                    {
+                        if (!targets.TryGetValue(kv.Key, out var o)) continue;
+                        if (!byDepth.TryGetValue(kv.Value, out var list))
+                        {
+                            list = new List<IGH_DocumentObject>();
+                            byDepth[kv.Value] = list;
+                        }
+                        list.Add(o);
+                    }
+
+                    int placed = 0;
+                    foreach (var col in byDepth.OrderBy(p => p.Key))
+                    {
+                        var sorted = col.Value
+                            .OrderBy(o => o.Attributes?.Pivot.Y ?? 0)
+                            .ToList();
+                        for (int i = 0; i < sorted.Count; i++)
+                        {
+                            var o = sorted[i];
+                            if (o.Attributes == null) continue;
+                            o.Attributes.Pivot = new System.Drawing.PointF(
+                                startX + col.Key * colWidth,
+                                startY + i * rowHeight);
+                            o.Attributes.ExpireLayout();
+                            placed++;
+                        }
+                    }
+
+                    Grasshopper.Instances.ActiveCanvas?.Refresh();
+
+                    result = SuccessResponse(new JObject
+                    {
+                        ["placed"] = placed,
+                        ["columns"] = byDepth.Count,
+                        ["start_x"] = startX,
+                        ["start_y"] = startY,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(15000);
+            if (error != null) return ErrorResponse($"Error in OrganizeComponents: {error.Message}");
             return result ?? ErrorResponse("Operation timed out");
         }
     }

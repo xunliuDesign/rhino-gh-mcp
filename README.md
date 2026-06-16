@@ -4,7 +4,7 @@
 > live Rhino 8 modeling session — for parametric design, architectural
 > research, and teaching.
 
-**Status**: v0.2.2 — five-Scenario canvas surface (Inspect / Tune /
+**Status**: v0.2.3 — five-Scenario canvas surface (Inspect / Tune /
 Coach / Execute / Author), Coach-mode canvas highlights, Skills v2
 schema with Execute-mode `allow_tools` gating, and auto-wired
 Toggle + Scenario value-list on component drop. Two-click install via
@@ -57,13 +57,13 @@ and [docs/handoff.md](docs/handoff.md) for the current status.
 ### Step 0 — Download these three files
 
 Go to the [latest GitHub release](https://github.com/xunliuDesign/rhino-gh-mcp/releases/latest)
-and download the three artifacts (replace `0.2.2` with whatever the
+and download the three artifacts (replace `0.2.3` with whatever the
 current release version is):
 
 | File | What it is | Where it goes |
 |---|---|---|
-| `rhino-gh-mcp-0.2.2.mcpb` | Claude Desktop extension (Python MCP server bundled) | Claude Desktop |
-| `rhinogh-mcp-grasshopper-0.2.2-rh8_0-any.yak` | Grasshopper canvas plugin (`.gha`) | Rhino Package Manager |
+| `rhino-gh-mcp-0.2.3.mcpb` | Claude Desktop extension (Python MCP server bundled) | Claude Desktop |
+| `rhinogh-mcp-grasshopper-0.2.3-rh8_0-any.yak` | Grasshopper canvas plugin (`.gha`) | Rhino Package Manager |
 | `rhinogh-mcp-rhino-0.1.1-rh8_0-any.yak` | Rhino document plugin (`.rhp`) | Rhino Package Manager |
 
 That's everything you need on disk.
@@ -81,7 +81,7 @@ both packages from the McNeel server.
 
 ### Step 2 — Install the Python MCP server in Claude Desktop
 
-Double-click `rhino-gh-mcp-0.2.2.mcpb`. Claude Desktop opens the
+Double-click `rhino-gh-mcp-0.2.3.mcpb`. Claude Desktop opens the
 Extensions panel with the install prompt. Confirm. First launch
 pip-installs ~5 Python dependencies (~30 s, one-time).
 

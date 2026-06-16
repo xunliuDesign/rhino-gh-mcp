@@ -130,6 +130,8 @@ _READ_TOOLS: frozenset[str] = frozenset(
         "gh_begin_turn",
         "gh_end_turn",
         "gh_dismiss_highlights",
+        # v0.2.3: read-side productivity tool — peek at a component output.
+        "gh_get_component_output",
     }
 )
 
@@ -141,6 +143,10 @@ _PARAMETER_WRITE_TOOLS: frozenset[str] = frozenset(
         "gh_set_component_parameter",
         "gh_set_slider_range",
         "gh_set_expression_formula",
+        # v0.2.3: parameter-write-shaped layout + content tools.
+        "gh_set_panel_content",
+        "gh_move_component",
+        "gh_organize_components",
     }
 )
 
@@ -156,6 +162,12 @@ _COMPONENT_WRITE_TOOLS: frozenset[str] = frozenset(
         "gh_load_skill_reference",
         # v0.2.2: arbitrary file path version of the above. Same risk profile.
         "gh_merge_definition",
+        # v0.2.3: productivity tools that ADD a new object to the canvas
+        # (Panel, Group, referencing Param, or a baked Rhino object).
+        "gh_bake_to_rhino",
+        "gh_reference_rhino_object",
+        "gh_add_panel",
+        "gh_group_components",
     }
 )
 

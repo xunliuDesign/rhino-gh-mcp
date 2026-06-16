@@ -39,6 +39,13 @@ allow_tools:
   - gh_remove_node
   - gh_recompute
   - rhino_set_view
+  # v0.2.3: productivity tools landform workflows benefit from.
+  - gh_bake_to_rhino           # finalize the landform mesh into Rhino
+  - gh_add_panel               # annotate sections of the canvas
+  - gh_group_components        # cluster basemesh / placer / modifiers groups
+  - gh_organize_components     # tidy after a multi-step build
+  - gh_move_component
+  - gh_reference_rhino_object  # let user-drawn curves drive placers
 commands:
   build_default_hill:
     description: "Build the default circular-hill landform chain (BaseMesh -> Circle -> Grid Placer -> Absolute Modifier -> Render). Equivalent to the 'Worked example' below — useful for Execute mode where the user wants the canonical setup with no improvisation."

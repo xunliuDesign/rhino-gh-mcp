@@ -277,6 +277,193 @@ def register(app: FastMCP, gh: GrasshopperBridge, caps: CapabilitiesProvider,
             pass
         return json.dumps({"cleared_turns": cleared}, indent=2)
 
+    # --- v0.2.3 productivity tools ---------------------------------------
+
+    @app.tool(name="gh_bake_to_rhino")
+    @gated(caps, "gh_bake_to_rhino")
+    def gh_bake_to_rhino(instance_guid: str, layer: str = "") -> str:
+        """Bake a Grasshopper component's output to the Rhino document.
+
+        Walks the component's outputs and bakes any bake-aware geometry
+        (curves, breps, meshes, points, …) to Rhino. Returns the list of
+        Rhino GUIDs that landed in the doc.
+
+        Args:
+            instance_guid: the GH component to bake from.
+            layer: optional Rhino layer name. Created if it doesn't exist.
+                Defaults to the current Rhino layer when empty.
+        """
+        try:
+            return _result(gh.send("bake_to_rhino",
+                                    instance_guid=instance_guid,
+                                    layer=layer))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_reference_rhino_object")
+    @gated(caps, "gh_reference_rhino_object")
+    def gh_reference_rhino_object(rhino_guid: str,
+                                   x: float = 100.0,
+                                   y: float = 100.0) -> str:
+        """Reference a Rhino document object as input to Grasshopper.
+
+        Drops the right kind of GH parameter (Curve / Brep / Mesh / Point /
+        Surface / Geometry) on the canvas with persistent data pointing at
+        the Rhino object's GUID — the same as right-clicking a Curve param
+        and choosing "Set one Curve" in Rhino.
+
+        Use this when the user has geometry already drawn in Rhino and you
+        want it as input to a definition you're building in Grasshopper.
+
+        Args:
+            rhino_guid: the Rhino object's GUID (from rhino_get_objects_with_metadata).
+            x, y: canvas position for the new param. Defaults to (100, 100).
+        """
+        try:
+            return _result(gh.send("reference_rhino_object",
+                                    rhino_guid=rhino_guid,
+                                    x=float(x), y=float(y)))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_add_panel")
+    @gated(caps, "gh_add_panel")
+    def gh_add_panel(text: str, x: float = 100.0, y: float = 100.0) -> str:
+        """Add a Grasshopper Panel containing arbitrary text.
+
+        Useful for leaving inline notes / explanations next to your work
+        so the user can read what each cluster of components is for.
+
+        Args:
+            text: the panel's content. Multiline supported.
+            x, y: canvas position. Defaults to (100, 100).
+        """
+        try:
+            return _result(gh.send("add_panel", text=text, x=float(x), y=float(y)))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_set_panel_content")
+    @gated(caps, "gh_set_panel_content")
+    def gh_set_panel_content(instance_guid: str, text: str) -> str:
+        """Replace the text on an existing Grasshopper Panel.
+
+        Args:
+            instance_guid: GUID of the Panel component.
+            text: new text content. Multiline supported.
+        """
+        try:
+            return _result(gh.send("set_panel_content",
+                                    instance_guid=instance_guid, text=text))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_get_component_output")
+    @gated(caps, "gh_get_component_output")
+    def gh_get_component_output(instance_guid: str,
+                                 output_name: str = "",
+                                 max_items: int = 100) -> str:
+        """Read the volatile data on a component's output (data tree summary).
+
+        Returns the branches and item values so you can explain what a
+        component is actually producing (numbers, point coordinates, curve
+        descriptions, ...). The output is the string form of each value,
+        which is human-readable for most goo types.
+
+        Args:
+            instance_guid: GUID of the component (or a floating param).
+            output_name: name or nickname of the output to read. Empty
+                reads the first output.
+            max_items: cap the total values returned. Default 100.
+        """
+        try:
+            return _result(gh.send("get_component_output",
+                                    instance_guid=instance_guid,
+                                    output_name=output_name,
+                                    max_items=int(max_items)))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_group_components")
+    @gated(caps, "gh_group_components")
+    def gh_group_components(instance_guids: list[str],
+                             nickname: str = "Group",
+                             color: str = "") -> str:
+        """Wrap components in a Grasshopper Group (visual cluster).
+
+        The group renders as a rounded rectangle behind the listed
+        components with the nickname displayed in the header. Useful for
+        keeping a parametric definition organized — group sliders together,
+        group the geometry-generating components, group the modifiers.
+
+        Args:
+            instance_guids: GUIDs of the components to include.
+            nickname: group label shown on canvas. Default "Group".
+            color: HTML hex string like "#FFE5A0" for the group background.
+                Leave empty for the default pastel.
+        """
+        try:
+            return _result(gh.send("group_components",
+                                    instance_guids=instance_guids,
+                                    nickname=nickname,
+                                    color=color))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_move_component")
+    @gated(caps, "gh_move_component")
+    def gh_move_component(instance_guid: str, x: float, y: float) -> str:
+        """Move a single canvas object to a new pivot.
+
+        For laying out the canvas tidily after the AI has been building,
+        prefer gh_organize_components — it computes a sensible left-to-right
+        flow automatically. Use this for one-off positioning.
+
+        Args:
+            instance_guid: GUID of the object to move.
+            x, y: new pivot in canvas coordinates.
+        """
+        try:
+            return _result(gh.send("move_component",
+                                    instance_guid=instance_guid,
+                                    x=float(x), y=float(y)))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
+    @app.tool(name="gh_organize_components")
+    @gated(caps, "gh_organize_components")
+    def gh_organize_components(instance_guids: list[str] | None = None,
+                                start_x: float = 100.0,
+                                start_y: float = 100.0,
+                                column_width: float = 250.0,
+                                row_height: float = 110.0) -> str:
+        """Auto-layout components left → right by data-flow depth.
+
+        Computes each component's depth (the longest path from a source) and
+        places it in a column at that depth, stacking parallel components
+        vertically. Run this after building a definition to escape the
+        "everything piled in one spot" problem.
+
+        Args:
+            instance_guids: GUIDs to organize. Omit to organize ALL canvas
+                objects (recommended after you've just added a bunch).
+            start_x, start_y: top-left anchor for the layout.
+            column_width: horizontal gap between depth columns.
+            row_height: vertical gap between siblings.
+        """
+        args: dict[str, Any] = {
+            "start_x": float(start_x),
+            "start_y": float(start_y),
+            "column_width": float(column_width),
+            "row_height": float(row_height),
+        }
+        if instance_guids:
+            args["instance_guids"] = instance_guids
+        try:
+            return _result(gh.send("organize_components", **args))
+        except BridgeError as exc:
+            return f"Error: {exc}"
+
 
 # --- .gh archive introspection ------------------------------------------------
 # Grasshopper's binary format (.gh) is a deflate-compressed XML document.
