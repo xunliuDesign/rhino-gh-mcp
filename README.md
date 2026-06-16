@@ -48,36 +48,40 @@ and [docs/handoff.md](docs/handoff.md) for the current status.
 
 ---
 
-## Quick start — three files, three clicks
+## Quick start — Package Manager + one download
 
 > For designers and architecture students. No `git clone`, no `uv`,
 > no `dotnet`. You need: **Rhino 8** installed, **Claude Desktop**
 > installed, and **Python 3.11+** on your PATH. About 5 minutes.
 
-### Step 0 — Download these three files
+### Step 0 — Download the Claude Desktop extension
 
 Go to the [latest GitHub release](https://github.com/xunliuDesign/rhino-gh-mcp/releases/latest)
-and download the three artifacts (replace `0.2.4` with whatever the
-current release version is):
+and download:
 
 | File | What it is | Where it goes |
 |---|---|---|
-| `rhino-gh-mcp-0.2.4.mcpb` | Claude Desktop extension (Python MCP server bundled) | Claude Desktop |
-| `rhinogh-mcp-grasshopper-0.2.4-rh8_0-any.yak` | Grasshopper canvas plugin (`.gha`) | Rhino Package Manager |
-| `rhinogh-mcp-rhino-0.1.1-rh8_0-any.yak` | Rhino document plugin (`.rhp`) | Rhino Package Manager |
+| `rhino-gh-mcp-X.Y.Z.mcpb` | Claude Desktop extension (Python MCP server bundled) | Claude Desktop |
 
-That's everything you need on disk.
+The two Rhino plugins (`.yak` files) install **from inside Rhino** via
+Package Manager in Step 1 — you don't need to download them. (They're
+also on the release page if you want the offline / drag-and-drop
+fallback.)
 
 ### Step 1 — Install the Rhino + Grasshopper plugins
 
-Drag each `.yak` file onto an open Rhino 8 window. Rhino's Package
-Manager opens and installs the package — confirm the prompt. Do both
-files, then restart Rhino.
+Launch Rhino 8, run `_PackageManager` at the command line, search
+**rhino-gh-mcp**. Install both packages:
 
-*Alternatively*: once `yak push` is done (see
-[docs/packaging-status.md](docs/packaging-status.md)), run
-`_PackageManager` in Rhino and search **rhino-gh-mcp** to install
-both packages from the McNeel server.
+- `rhinogh-mcp-grasshopper` — the Grasshopper canvas bridge (`.gha`)
+- `rhinogh-mcp-rhino` — the Rhino document bridge (`.rhp`)
+
+Restart Rhino. The plugins land in the **MCP** ribbon tab in
+Grasshopper.
+
+*Offline / firewalled / older Rhino?* Skip Package Manager: drag each
+`.yak` file from the latest GitHub release onto an open Rhino 8
+window — same install dialog, no network needed.
 
 ### Step 2 — Install the Python MCP server in Claude Desktop
 
