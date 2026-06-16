@@ -105,6 +105,50 @@ def register(app: FastMCP, gh: GrasshopperBridge, caps: CapabilitiesProvider,
             return f"Error: failed to parse {path.name}: {exc}"
         return json.dumps(summary, indent=2, default=str)
 
+    @app.tool(name="gh_merge_definition")
+    @gated(caps, "gh_merge_definition")
+    def gh_merge_definition(file_path: str,
+                            pivot_x: float = 100.0,
+                            pivot_y: float = 100.0) -> str:
+        """Merge an arbitrary .gh definition from disk into the current canvas.
+
+        Unlike gh_load_skill_reference (which only loads from a Skill bundle),
+        this accepts any file path. Use it when the user has a downloaded
+        .gh file they want to inspect or modify alongside the MCP Server:
+
+          1. open a fresh canvas
+          2. drop the v2 Server component (Toggle + Value List auto-wire)
+          3. flip Run=True
+          4. ask the AI to call gh_merge_definition("/path/to/their/file.gh")
+
+        The bridge MergeDocument's the file's components into the current
+        canvas (does NOT replace) — the Server component stays. Newly placed
+        components are recorded in the current turn so they highlight teal
+        in Coach mode.
+
+        Args:
+            file_path: Absolute path to a .gh or .ghx file.
+            pivot_x: top-left X for the merged objects. Default 100.
+            pivot_y: top-left Y. Default 100.
+        """
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file():
+            return f"Error: file not found: {path}"
+        try:
+            data_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError as exc:
+            return f"Error: could not read {path}: {exc}"
+        try:
+            reply = gh.send(
+                "load_definition",
+                data=data_b64,
+                pivot_x=float(pivot_x),
+                pivot_y=float(pivot_y),
+            )
+        except BridgeError as exc:
+            return f"Error: {exc}"
+        return _result(reply)
+
     @app.tool(name="gh_load_skill_reference")
     @gated(caps, "gh_load_skill_reference")
     def gh_load_skill_reference(skill_id: str, ref_name: str,

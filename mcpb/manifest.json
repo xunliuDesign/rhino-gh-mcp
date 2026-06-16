@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "rhino-gh-mcp",
   "display_name": "Rhino / Grasshopper MCP",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Tiered LLM control of Rhino 3D and Grasshopper for parametric design, architectural research, and teaching.",
   "long_description": "Connects an MCP client (Claude Desktop, Claude Code, Cursor, web UI) to a running Rhino 8 session. Three tool-surface tiers — parameter-only, curated component group, full authority — let you scale from safe student exploration to script-component injection. Requires the companion Grasshopper (.gha) and Rhino (.rhp) plugins, installed via Rhino's Package Manager (search 'rhino-gh-mcp') or by dragging the Yak packages onto Rhino.\n\nFirst launch installs Python dependencies into the extension directory (~30 seconds, one-time). Python 3.11 or newer must be on your PATH.",
   "author": {

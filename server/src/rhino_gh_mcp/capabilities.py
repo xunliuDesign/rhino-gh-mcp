@@ -154,6 +154,8 @@ _COMPONENT_WRITE_TOOLS: frozenset[str] = frozenset(
         # v0.2: loading a Skill's reference .gh definition merges components
         # into the current canvas — same risk profile as gh_add_component.
         "gh_load_skill_reference",
+        # v0.2.2: arbitrary file path version of the above. Same risk profile.
+        "gh_merge_definition",
     }
 )
 
