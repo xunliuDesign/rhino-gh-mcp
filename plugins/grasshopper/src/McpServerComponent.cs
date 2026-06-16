@@ -177,14 +177,28 @@ namespace RhinoGhMcp
             {
                 var asm = typeof(McpServerComponent).Assembly;
                 var name = asm.GetName();
+                string ver = name.Version != null
+                    ? TrimTrailingZeroParts(name.Version.ToString())
+                    : "0.0.0";
                 return string.Format("rhino-gh-mcp v{0} ({1})",
-                    name.Version != null ? name.Version.ToString() : "0.0.0",
-                    "https://github.com/xunliuDesign/rhino-gh-mcp");
+                    ver, "https://github.com/xunliuDesign/rhino-gh-mcp");
             }
             catch
             {
                 return "rhino-gh-mcp v? (https://github.com/xunliuDesign/rhino-gh-mcp)";
             }
+        }
+
+        // .NET assembly versions are always 4 parts (e.g. "0.2.0.0").
+        // Display the human semver form by trimming trailing ".0" parts,
+        // keeping at least major.minor.
+        private static string TrimTrailingZeroParts(string ver)
+        {
+            if (string.IsNullOrEmpty(ver)) return ver;
+            var parts = ver.Split('.');
+            int last = parts.Length - 1;
+            while (last > 1 && parts[last] == "0") last--;
+            return string.Join(".", parts, 0, last + 1);
         }
         /// <summary>
         /// The Exposure property controls where in the panel a component icon 
@@ -225,31 +239,46 @@ namespace RhinoGhMcp
         public override Guid ComponentGuid => new Guid("005a98bf-a9f8-4e11-a96a-ea4eafb59c4c");
 
         // --- Server State ---
-        private Thread serverThread = null;
-        private volatile bool runServer = false;
-        private string serverStatus = "Server Off";
-        private string debugOutput = "";
-        private int port = 9999;
-        private string host = "127.0.0.1";
-        private string lastError = null;
-        private TcpListener listener = null;
-        private object serverLock = new object();
-        private string currentCategoryFilter = "MCP";
+        // v0.2: visibility relaxed to `protected` so McpServerComponentV2 can
+        // inherit this class for its TCP listener + dispatch infrastructure
+        // without us duplicating ~2k lines of bridge code. V2 only overrides
+        // RegisterInputParams + SolveInstance + adds a Scenario knob; the
+        // rest of the protocol stays identical.
+        protected Thread serverThread = null;
+        protected volatile bool runServer = false;
+        protected string serverStatus = "Server Off";
+        protected string debugOutput = "";
+        protected int port = 9999;
+        protected string host = "127.0.0.1";
+        protected string lastError = null;
+        protected TcpListener listener = null;
+        protected object serverLock = new object();
+        protected string currentCategoryFilter = "MCP";
 
         // v0.1.5: capability + scope state (settable from canvas inputs).
-        private bool currentAllowParameters = true;
-        private bool currentAllowComponents = true;
-        private bool currentAllowScripting = false;
+        protected bool currentAllowParameters = true;
+        protected bool currentAllowComponents = true;
+        protected bool currentAllowScripting = false;
         // 0 = curated (CategoryFilter), 1 = gh defaults, 2 = all
-        private int currentComponentScope = 1;
+        protected int currentComponentScope = 1;
 
-        private bool currentAutoRecompute = false;
+        protected bool currentAutoRecompute = false;
+
+        // v0.2: scenario + active-skill state, set by V2 component's SolveInstance.
+        // V1 leaves these at defaults — the bridge surfaces them in get_capabilities
+        // so the Python server can derive its own gating decisions. Static so V2
+        // (a separate component instance) and V1 share the same authoritative state
+        // when both happen to be on the same canvas (edge case — only one bridge
+        // listener can hold the port at a time, but the fields are read elsewhere).
+        protected static string currentScenario = "author"; // inspect|tune|coach|execute|author
+        protected static string currentActiveSkill = "";    // empty = no skill restriction
 
         // === Persistent Debug Log and Error System ===
-        private static ConcurrentQueue<string> debugLog = new ConcurrentQueue<string>();
-        private void LogDebug(string msg) { debugLog.Enqueue($"[{DateTime.Now:HH:mm:ss}] {msg}"); if (debugLog.Count > 1000) debugLog.TryDequeue(out _); }
-        private void LogError(string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] {msg}"; LogDebug("ERROR: " + msg); }
-        private void LogError(string context, string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] [{context}] {msg}"; LogDebug($"ERROR [{context}]: {msg}"); }
+        // v0.2: protected so subclasses (V2) can log into the same buffer.
+        protected static ConcurrentQueue<string> debugLog = new ConcurrentQueue<string>();
+        protected void LogDebug(string msg) { debugLog.Enqueue($"[{DateTime.Now:HH:mm:ss}] {msg}"); if (debugLog.Count > 1000) debugLog.TryDequeue(out _); }
+        protected void LogError(string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] {msg}"; LogDebug("ERROR: " + msg); }
+        protected void LogError(string context, string msg) { lastError = $"[{DateTime.Now:HH:mm:ss}] [{context}] {msg}"; LogDebug($"ERROR [{context}]: {msg}"); }
         private JObject GetDebugLog(JObject cmd)
         {
             var arr = new JArray(debugLog.ToArray());
@@ -285,7 +314,8 @@ namespace RhinoGhMcp
         }
 
         // --- Server Thread Loop (scaffold) ---
-        private void ServerThreadLoop()
+        // v0.2: protected so V2 component can reuse the listener loop verbatim.
+        protected void ServerThreadLoop()
         {
             try
             {
@@ -548,6 +578,63 @@ namespace RhinoGhMcp
                     case "read_script_source":
                         result = ReadScriptSource(cmd);
                         break;
+                    // v0.2 additions ----------------------------------------
+                    // Turn tracking — Coach mode infrastructure. The Python
+                    // server brackets each AI response with begin/end_turn so
+                    // canvas-side highlighting (deferred to v0.2.x) can render
+                    // "what changed this turn" badges. In v0.2.0 the handlers
+                    // record state but do not paint anything.
+                    case "begin_turn":
+                        result = BeginTurn(cmd);
+                        break;
+                    case "end_turn":
+                        result = EndTurn(cmd);
+                        break;
+                    case "dismiss_highlights":
+                        result = DismissHighlights(cmd);
+                        break;
+                    // Skill reference file loading — places a saved .gh
+                    // definition's components onto the current canvas at a
+                    // chosen pivot. Gated as a component-write op.
+                    case "load_definition":
+                        result = LoadDefinitionFromBase64(cmd);
+                        break;
+                    // v0.2.3 productivity tools.
+                    case "bake_to_rhino":
+                        result = BakeToRhino(cmd);
+                        break;
+                    case "reference_rhino_object":
+                        result = ReferenceRhinoObject(cmd);
+                        break;
+                    case "add_panel":
+                        result = AddPanel(cmd);
+                        break;
+                    case "set_panel_content":
+                        result = SetPanelContent(cmd);
+                        break;
+                    case "get_component_output":
+                        result = GetComponentOutput(cmd);
+                        break;
+                    case "group_components":
+                        result = GroupComponents(cmd);
+                        break;
+                    case "move_component":
+                        result = MoveComponent(cmd);
+                        break;
+                    case "organize_components":
+                        result = OrganizeComponents(cmd);
+                        break;
+                    // v0.2.4: ultra-compact outline tools for fast canvas
+                    // analysis without dumping wire-level JSON.
+                    case "canvas_outline":
+                        result = CanvasOutline(cmd);
+                        break;
+                    case "file_outline":
+                        result = FileOutlineFromBase64(cmd);
+                        break;
+                    case "cluster_flow":
+                        result = ClusterFlow(cmd);
+                        break;
                     default:
                         return ErrorResponse($"Unknown command type: {type}");
                 }
@@ -725,7 +812,8 @@ namespace RhinoGhMcp
                     slider.Slider.DecimalPlaces = integer ? 0 : 2;
                     slider.Attributes.Pivot = new System.Drawing.PointF(x, y);
                     doc.AddObject(slider, false);
-                    result = new JObject { ["status"] = "success", ["result"] = $"Slider '{name}' added at ({x},{y})" };
+                    RecordTurnChange(slider.InstanceGuid);  // v0.2.4 bug fix
+                    result = new JObject { ["status"] = "success", ["result"] = $"Slider '{name}' added at ({x},{y})", ["instance_guid"] = slider.InstanceGuid.ToString() };
                 }
                 catch (Exception ex)
                 {
@@ -1444,7 +1532,8 @@ namespace RhinoGhMcp
         }
 
         // --- Utility: Expire this component's solution from any thread (SAFELY)
-        private void ExpireComponentSolution()
+        // v0.2: protected so V2 component can call from its own thread loop.
+        protected void ExpireComponentSolution()
         {
             try
             {
@@ -2007,6 +2096,9 @@ namespace RhinoGhMcp
             "add_slider_to_canvas",
             "connect_components",
             "remove_node",
+            // v0.2: dropping a Skill's reference .gh onto the canvas mutates
+            // the component tree, so it needs AllowComponents.
+            "load_definition",
         };
         private static readonly HashSet<string> _scriptingCommands = new HashSet<string>
         {
@@ -2034,6 +2126,10 @@ namespace RhinoGhMcp
 
         // v0.1.5: report the live canvas-level capability state. The Python
         // CapabilitiesProvider polls this and uses it to drive its runtime gate.
+        // v0.2: additionally surface `scenario` and `active_skill` so the server
+        // can derive its own Coach/Execute-mode behaviour without re-asking the
+        // canvas. Old (v0.1) component leaves them at default values; new (v2)
+        // component sets them from its Scenario and ActiveSkill inputs.
         private JObject GetCapabilities(JObject cmd)
         {
             string scope = currentComponentScope == 2 ? "all"
@@ -2050,6 +2146,8 @@ namespace RhinoGhMcp
                     ["component_scope"] = scope,
                     ["category_filter"] = currentCategoryFilter,
                     ["plugin_version"] = PluginVersionString,
+                    ["scenario"] = currentScenario,
+                    ["active_skill"] = currentActiveSkill,
                 },
             };
         }
@@ -2646,6 +2744,1385 @@ namespace RhinoGhMcp
 
             done.Wait(15000); // canvas rendering can take a moment on large definitions
             if (error != null) return ErrorResponse($"Error capturing canvas: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // ============================================================
+        // v0.2 — Coach-mode turn tracking + skill reference loading.
+        // ============================================================
+        //
+        // Turn tracking maps an AI response cycle (one round of begin_turn +
+        // bridge calls + end_turn) to the set of canvas GUIDs the AI touched
+        // during that cycle. The plan in v0.2.0 is text-only: we record state
+        // and surface it via end_turn's response so the AI can self-narrate
+        // ("What I changed this turn: ..."). Canvas-side visual highlighting
+        // is deferred to v0.2.x (TODO below).
+
+        // Active turn id, monotonic per-process. Long so wrap is impractical.
+        private static long currentTurnId = 0;
+        private static readonly object turnLock = new object();
+        // turnId -> set of GUIDs the AI touched during that turn.
+        private static Dictionary<long, HashSet<Guid>> turnChanges =
+            new Dictionary<long, HashSet<Guid>>();
+
+        // v0.2.x — canvas-side highlight state. Populated by EndTurn, drained
+        // by DismissHighlights. The post-paint handler (OnCanvasPostPaint)
+        // draws a teal ring around every object in this set after the canvas
+        // finishes its normal render pass.
+        private static readonly HashSet<Guid> highlightedGuids = new HashSet<Guid>();
+        private static bool canvasHandlerHooked = false;
+
+        // Public so the bridge handlers below — and v0.2.x highlight painter —
+        // can append to the active turn from any thread.
+        protected static void RecordTurnChange(Guid guid)
+        {
+            lock (turnLock)
+            {
+                if (currentTurnId == 0) return;
+                if (!turnChanges.TryGetValue(currentTurnId, out var set))
+                {
+                    set = new HashSet<Guid>();
+                    turnChanges[currentTurnId] = set;
+                }
+                set.Add(guid);
+            }
+        }
+
+        private JObject BeginTurn(JObject cmd)
+        {
+            lock (turnLock)
+            {
+                currentTurnId++;
+                if (!turnChanges.ContainsKey(currentTurnId))
+                    turnChanges[currentTurnId] = new HashSet<Guid>();
+                return SuccessResponse(new JObject
+                {
+                    ["turn_id"] = currentTurnId,
+                });
+            }
+        }
+
+        private JObject EndTurn(JObject cmd)
+        {
+            long turnId = (long?)cmd["turn_id"] ?? 0L;
+            HashSet<Guid> snapshot;
+            lock (turnLock)
+            {
+                if (turnId == 0 || !turnChanges.TryGetValue(turnId, out var set))
+                {
+                    return SuccessResponse(new JObject
+                    {
+                        ["turn_id"] = turnId,
+                        ["changed_count"] = 0,
+                        ["changed_guids"] = new JArray(),
+                    });
+                }
+                snapshot = new HashSet<Guid>(set);
+                // v0.2.x — keep these GUIDs in the canvas highlight set until
+                // gh_dismiss_highlights is called. Union (not assign) so multi-turn
+                // sessions accumulate the badges instead of overwriting earlier turns.
+                highlightedGuids.UnionWith(set);
+            }
+
+            // Touch the canvas outside the lock — UI thread + redraw to surface
+            // the rings the post-paint handler draws.
+            RunOnUiThread(() =>
+            {
+                EnsureCanvasHandlerHooked();
+                Grasshopper.Instances.ActiveCanvas?.Refresh();
+            });
+
+            var arr = new JArray();
+            foreach (var g in snapshot)
+                arr.Add(g.ToString());
+            return SuccessResponse(new JObject
+            {
+                ["turn_id"] = turnId,
+                ["changed_count"] = snapshot.Count,
+                ["changed_guids"] = arr,
+            });
+        }
+
+        private JObject DismissHighlights(JObject cmd)
+        {
+            long? turnId = (long?)cmd["turn_id"];
+            JObject response;
+            lock (turnLock)
+            {
+                if (turnId == null || turnId == 0)
+                {
+                    int n = turnChanges.Count;
+                    turnChanges.Clear();
+                    highlightedGuids.Clear();
+                    response = new JObject { ["cleared_turns"] = n };
+                }
+                else
+                {
+                    if (turnChanges.TryGetValue(turnId.Value, out var set) && set != null)
+                        highlightedGuids.ExceptWith(set);
+                    turnChanges.Remove(turnId.Value);
+                    response = new JObject { ["cleared_turn"] = turnId.Value };
+                }
+            }
+            RunOnUiThread(() => Grasshopper.Instances.ActiveCanvas?.Refresh());
+            return SuccessResponse(response);
+        }
+
+        // v0.2.x — lazily hook the canvas post-paint event so we draw highlights
+        // after the default render pass. Idempotent: safe to call from every
+        // EndTurn. We do NOT unhook on server stop — the handler is harmless
+        // when highlightedGuids is empty and Grasshopper tears it down with the
+        // canvas itself.
+        private static void EnsureCanvasHandlerHooked()
+        {
+            if (canvasHandlerHooked) return;
+            var canvas = Grasshopper.Instances.ActiveCanvas;
+            if (canvas == null) return;
+            canvas.CanvasPostPaintObjects -= OnCanvasPostPaint;
+            canvas.CanvasPostPaintObjects += OnCanvasPostPaint;
+            canvasHandlerHooked = true;
+        }
+
+        // Post-paint handler: walk highlightedGuids and outline each object's
+        // bounds with a teal ring. The color is deliberately distinct from
+        // Grasshopper's built-in selection (white) and runtime-message tints
+        // (warning yellow, error red) so the user can tell at a glance that
+        // the AI touched these.
+        private static void OnCanvasPostPaint(Grasshopper.GUI.Canvas.GH_Canvas sender)
+        {
+            HashSet<Guid> snapshot;
+            lock (turnLock)
+            {
+                if (highlightedGuids.Count == 0) return;
+                snapshot = new HashSet<Guid>(highlightedGuids);
+            }
+            var doc = sender?.Document;
+            if (doc == null) return;
+            var g = sender.Graphics;
+            if (g == null) return;
+            using (var pen = new System.Drawing.Pen(
+                System.Drawing.Color.FromArgb(255, 0, 200, 200), 3f))
+            {
+                pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                foreach (var guid in snapshot)
+                {
+                    var obj = doc.FindObject(guid, false);
+                    if (obj?.Attributes == null) continue;
+                    var bounds = System.Drawing.RectangleF.Inflate(
+                        obj.Attributes.Bounds, 4f, 4f);
+                    g.DrawRectangle(pen, bounds.X, bounds.Y, bounds.Width, bounds.Height);
+                }
+            }
+        }
+
+        // Load a .gh definition (sent as base64-encoded bytes) and merge its
+        // components into the current canvas at an optional pivot. The Python
+        // tool gh_load_skill_reference reads the file off disk and sends it
+        // here; doing the file read server-side keeps the bridge protocol
+        // string-only and avoids cross-process file-path coupling.
+        private JObject LoadDefinitionFromBase64(JObject cmd)
+        {
+            string b64 = (string)cmd["data"];
+            float pivotX = (float?)cmd["pivot_x"] ?? 100f;
+            float pivotY = (float?)cmd["pivot_y"] ?? 100f;
+            if (string.IsNullOrEmpty(b64))
+                return ErrorResponse("`data` is required (base64-encoded .gh archive bytes).");
+
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(b64); }
+            catch (Exception ex) { return ErrorResponse($"Bad base64 payload: {ex.Message}"); }
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                string tmpPath = null;
+                try
+                {
+                    tmpPath = Path.Combine(Path.GetTempPath(), $"rhino-gh-mcp-skill-{Guid.NewGuid():N}.gh");
+                    File.WriteAllBytes(tmpPath, bytes);
+
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active Grasshopper document."); return; }
+
+                    var archive = new GH_IO.Serialization.GH_Archive();
+                    if (!archive.ReadFromFile(tmpPath))
+                    {
+                        result = ErrorResponse("Failed to parse .gh archive.");
+                        return;
+                    }
+
+                    // MergeWith places the archive's objects into the existing
+                    // doc — preferred over Open which replaces the document.
+                    var loaded = new GH_Document();
+                    if (!archive.ExtractObject(loaded, "Definition"))
+                    {
+                        result = ErrorResponse("Archive did not contain a 'Definition' root.");
+                        return;
+                    }
+
+                    int placedCount = loaded.ObjectCount;
+                    var placedGuids = new List<Guid>();
+                    // v0.2.4 bug fix: snapshot GUIDs + original pivots BEFORE
+                    // MergeDocument moves the objects out of `loaded`. Without
+                    // this, the post-merge foreach over loaded.Objects is empty
+                    // and loaded_guids comes back as [] even on a 64-component
+                    // merge.
+                    var beforeMerge = new List<(Guid guid, System.Drawing.PointF originalPivot)>();
+                    var minPt = new System.Drawing.PointF(float.MaxValue, float.MaxValue);
+                    foreach (var obj in loaded.Objects)
+                    {
+                        var p = obj.Attributes?.Pivot ?? new System.Drawing.PointF(0, 0);
+                        beforeMerge.Add((obj.InstanceGuid, p));
+                        if (obj.Attributes != null)
+                        {
+                            if (p.X < minPt.X) minPt = new System.Drawing.PointF(p.X, minPt.Y);
+                            if (p.Y < minPt.Y) minPt = new System.Drawing.PointF(minPt.X, p.Y);
+                        }
+                    }
+                    float dx = pivotX - (minPt.X == float.MaxValue ? 0 : minPt.X);
+                    float dy = pivotY - (minPt.Y == float.MaxValue ? 0 : minPt.Y);
+
+                    doc.MergeDocument(loaded, true, true);
+
+                    // Walk by GUID (objects now live in `doc`, not `loaded`).
+                    foreach (var (guid, originalPivot) in beforeMerge)
+                    {
+                        var obj = doc.FindObject(guid, false);
+                        if (obj?.Attributes != null)
+                        {
+                            obj.Attributes.Pivot = new System.Drawing.PointF(
+                                originalPivot.X + dx, originalPivot.Y + dy);
+                        }
+                        placedGuids.Add(guid);
+                        RecordTurnChange(guid);
+                    }
+                    doc.NewSolution(false);
+
+                    var arr = new JArray();
+                    foreach (var g in placedGuids) arr.Add(g.ToString());
+                    result = SuccessResponse(new JObject
+                    {
+                        ["loaded_count"] = placedCount,
+                        ["pivot_x"] = pivotX,
+                        ["pivot_y"] = pivotY,
+                        ["loaded_guids"] = arr,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally
+                {
+                    if (tmpPath != null) { try { File.Delete(tmpPath); } catch { } }
+                    done.Set();
+                }
+            });
+
+            done.Wait(30000);
+            if (error != null) return ErrorResponse($"Error loading definition: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // ============================================================
+        // v0.2.3 — productivity tools: bake, reference, panel, group,
+        // move, organize, get-output. Each is a thin wrapper around the
+        // existing GH / Rhino APIs; the value-add is exposing them
+        // through the MCP surface so the AI can use them autonomously.
+        // ============================================================
+
+        /// <summary>
+        /// Bake a component's outputs into the active Rhino document.
+        /// Walks every output of the target component, asks each piece of
+        /// volatile data to bake itself via IGH_BakeAwareData, and returns
+        /// the list of Rhino GUIDs that landed in the doc.
+        /// </summary>
+        private JObject BakeToRhino(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            string layerName = (string)cmd["layer"];  // optional
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+
+                    var rhinoDoc = Rhino.RhinoDoc.ActiveDoc;
+                    if (rhinoDoc == null) { result = ErrorResponse("No active Rhino document."); return; }
+
+                    var attr = new Rhino.DocObjects.ObjectAttributes();
+                    if (!string.IsNullOrEmpty(layerName))
+                    {
+                        int layerIdx = rhinoDoc.Layers.FindByFullPath(layerName, -1);
+                        if (layerIdx < 0)
+                            layerIdx = rhinoDoc.Layers.Add(layerName, System.Drawing.Color.Black);
+                        if (layerIdx >= 0) attr.LayerIndex = layerIdx;
+                    }
+
+                    var bakedGuids = new List<Guid>();
+                    int errorCount = 0;
+
+                    // Path 1: component-level bake (preferred).
+                    if (obj is IGH_BakeAwareObject bakeObj)
+                    {
+                        bakeObj.BakeGeometry(rhinoDoc, attr, bakedGuids);
+                    }
+                    // Path 2: walk outputs, bake each goo individually.
+                    else if (obj is IGH_Component comp)
+                    {
+                        foreach (var output in comp.Params.Output)
+                        {
+                            foreach (var goo in output.VolatileData.AllData(true))
+                            {
+                                if (goo is IGH_BakeAwareData bakeGoo)
+                                {
+                                    try
+                                    {
+                                        if (bakeGoo.BakeGeometry(rhinoDoc, attr, out var bg))
+                                            bakedGuids.Add(bg);
+                                    }
+                                    catch { errorCount++; }
+                                }
+                            }
+                        }
+                    }
+                    else if (obj is IGH_Param param)
+                    {
+                        foreach (var goo in param.VolatileData.AllData(true))
+                        {
+                            if (goo is IGH_BakeAwareData bakeGoo)
+                            {
+                                try
+                                {
+                                    if (bakeGoo.BakeGeometry(rhinoDoc, attr, out var bg))
+                                        bakedGuids.Add(bg);
+                                }
+                                catch { errorCount++; }
+                            }
+                        }
+                    }
+
+                    if (bakedGuids.Count > 0) rhinoDoc.Views.Redraw();
+
+                    var arr = new JArray();
+                    foreach (var g in bakedGuids) arr.Add(g.ToString());
+                    result = SuccessResponse(new JObject
+                    {
+                        ["baked_count"] = bakedGuids.Count,
+                        ["baked_rhino_guids"] = arr,
+                        ["layer"] = layerName ?? rhinoDoc.Layers.CurrentLayer.FullPath,
+                        ["error_count"] = errorCount,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(15000);
+            if (error != null) return ErrorResponse($"Error in BakeToRhino: {error.Message}");
+            return result ?? ErrorResponse("Bake timed out");
+        }
+
+        /// <summary>
+        /// Drop a Curve / Brep / Mesh / Point / Surface / Geometry param on
+        /// the GH canvas with persistent data referencing a Rhino object by
+        /// GUID. This is the "right-click → Set one Curve" workflow exposed
+        /// to the AI. Type is auto-detected from the Rhino object's geometry.
+        /// </summary>
+        private JObject ReferenceRhinoObject(JObject cmd)
+        {
+            string rhinoGuidStr = (string)cmd["rhino_guid"];
+            float x = (float?)cmd["x"] ?? 100f;
+            float y = (float?)cmd["y"] ?? 100f;
+            if (string.IsNullOrEmpty(rhinoGuidStr))
+                return ErrorResponse("`rhino_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var rhinoDoc = Rhino.RhinoDoc.ActiveDoc;
+                    if (rhinoDoc == null) { result = ErrorResponse("No active Rhino document."); return; }
+
+                    Guid rhinoGuid = new Guid(rhinoGuidStr);
+                    var rhinoObj = rhinoDoc.Objects.Find(rhinoGuid);
+                    if (rhinoObj == null) { result = ErrorResponse($"No Rhino object with guid {rhinoGuidStr}"); return; }
+
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+
+                    // Determine the right param type for this Rhino geometry.
+                    string paramType;
+                    IGH_Param param;
+                    var geom = rhinoObj.Geometry;
+                    if (geom is Rhino.Geometry.Curve)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Curve();
+                        var goo = new Grasshopper.Kernel.Types.GH_Curve();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Curve";
+                    }
+                    else if (geom is Rhino.Geometry.Brep)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Brep();
+                        var goo = new Grasshopper.Kernel.Types.GH_Brep();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Brep";
+                    }
+                    else if (geom is Rhino.Geometry.Mesh)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Mesh();
+                        var goo = new Grasshopper.Kernel.Types.GH_Mesh();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Mesh";
+                    }
+                    else if (geom is Rhino.Geometry.Surface)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Surface();
+                        var goo = new Grasshopper.Kernel.Types.GH_Surface();
+                        goo.ReferenceID = rhinoGuid;
+                        goo.LoadGeometry(rhinoDoc);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Surface";
+                    }
+                    else if (geom is Rhino.Geometry.Point)
+                    {
+                        var p = new Grasshopper.Kernel.Parameters.Param_Point();
+                        var pt = ((Rhino.Geometry.Point)geom).Location;
+                        var goo = new Grasshopper.Kernel.Types.GH_Point(pt);
+                        p.PersistentData.Append(goo, new Grasshopper.Kernel.Data.GH_Path(0));
+                        param = p; paramType = "Point";
+                    }
+                    else
+                    {
+                        // Fallback: unrecognized geometry kind. Drop a generic
+                        // Geometry param without persistent data — caller can
+                        // right-click → "Set one Geometry" to attach the ref.
+                        var p = new Grasshopper.Kernel.Parameters.Param_Geometry();
+                        param = p; paramType = geom?.GetType().Name ?? "Geometry";
+                    }
+
+                    param.NickName = rhinoObj.Name?.Trim();
+                    if (string.IsNullOrEmpty(param.NickName)) param.NickName = paramType;
+                    param.CreateAttributes();
+                    param.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                    doc.AddObject(param, false);
+                    RecordTurnChange(param.InstanceGuid);
+
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = param.InstanceGuid.ToString(),
+                        ["param_type"] = paramType,
+                        ["rhino_guid"] = rhinoGuidStr,
+                        ["x"] = x,
+                        ["y"] = y,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in ReferenceRhinoObject: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Add a Grasshopper Panel at (x, y) with the given text content.
+        /// Useful for the AI to leave inline notes / labels next to its work.
+        /// </summary>
+        private JObject AddPanel(JObject cmd)
+        {
+            string text = (string)cmd["text"] ?? "";
+            float x = (float?)cmd["x"] ?? 100f;
+            float y = (float?)cmd["y"] ?? 100f;
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var panel = new Grasshopper.Kernel.Special.GH_Panel();
+                    panel.UserText = text;
+                    panel.Properties.Multiline = text.Contains("\n");
+                    panel.CreateAttributes();
+                    panel.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                    doc.AddObject(panel, false);
+                    RecordTurnChange(panel.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = panel.InstanceGuid.ToString(),
+                        ["x"] = x,
+                        ["y"] = y,
+                        ["text_length"] = text.Length,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in AddPanel: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Change the text on an existing Panel.
+        /// </summary>
+        private JObject SetPanelContent(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            string text = (string)cmd["text"] ?? "";
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+                    if (!(obj is Grasshopper.Kernel.Special.GH_Panel panel))
+                        return; // Will fall through to error below.
+                    panel.UserText = text;
+                    panel.Properties.Multiline = text.Contains("\n");
+                    panel.ExpireSolution(false);
+                    RecordTurnChange(panel.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = guidStr,
+                        ["text_length"] = text.Length,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in SetPanelContent: {error.Message}");
+            return result ?? ErrorResponse("Object is not a Panel, or operation timed out");
+        }
+
+        /// <summary>
+        /// Read the volatile data on a component's output. Returns a
+        /// data-tree summary (path + flattened value strings per branch).
+        /// Used by the AI to explain what a component is actually producing.
+        /// </summary>
+        private JObject GetComponentOutput(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            string outputName = (string)cmd["output_name"];  // optional; first output if missing
+            int maxItems = (int?)cmd["max_items"] ?? 100;
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+
+                    IGH_Param outputParam = null;
+                    if (obj is IGH_Component comp)
+                    {
+                        if (comp.Params.Output.Count == 0)
+                        {
+                            result = ErrorResponse("Component has no outputs.");
+                            return;
+                        }
+                        if (!string.IsNullOrEmpty(outputName))
+                        {
+                            outputParam = comp.Params.Output.FirstOrDefault(
+                                p => p.Name == outputName || p.NickName == outputName);
+                            if (outputParam == null)
+                            {
+                                result = ErrorResponse(
+                                    $"No output named {outputName}. Available: " +
+                                    string.Join(", ", comp.Params.Output.Select(p => p.NickName)));
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            outputParam = comp.Params.Output[0];
+                        }
+                    }
+                    else if (obj is IGH_Param p)
+                    {
+                        outputParam = p;
+                    }
+                    else
+                    {
+                        result = ErrorResponse("Object has no readable output.");
+                        return;
+                    }
+
+                    var data = outputParam.VolatileData;
+                    var branches = new JArray();
+                    int totalItems = 0;
+                    int branchCount = data.PathCount;
+                    for (int b = 0; b < branchCount && totalItems < maxItems; b++)
+                    {
+                        var path = data.get_Path(b);
+                        var branch = data.get_Branch(b);
+                        var items = new JArray();
+                        foreach (var goo in branch)
+                        {
+                            if (totalItems >= maxItems) break;
+                            items.Add(goo?.ToString() ?? "null");
+                            totalItems++;
+                        }
+                        branches.Add(new JObject
+                        {
+                            ["path"] = path.ToString(),
+                            ["count"] = branch.Count,
+                            ["values"] = items,
+                        });
+                    }
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = guidStr,
+                        ["output_name"] = outputParam.NickName,
+                        ["output_type"] = outputParam.TypeName,
+                        ["branch_count"] = branchCount,
+                        ["item_count"] = data.DataCount,
+                        ["truncated"] = totalItems >= maxItems && data.DataCount > maxItems,
+                        ["branches"] = branches,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in GetComponentOutput: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Wrap a list of components in a Grasshopper Group (visual cluster
+        /// with an optional nickname and color). Sees the standard Group
+        /// rectangle on the canvas.
+        /// </summary>
+        private JObject GroupComponents(JObject cmd)
+        {
+            var guidsArr = cmd["instance_guids"] as JArray;
+            if (guidsArr == null || guidsArr.Count == 0)
+                return ErrorResponse("`instance_guids` (array) is required.");
+            string nickname = (string)cmd["nickname"] ?? "Group";
+            string colorHex = (string)cmd["color"];
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var group = new Grasshopper.Kernel.Special.GH_Group();
+                    group.NickName = nickname;
+                    int added = 0;
+                    foreach (var token in guidsArr)
+                    {
+                        var s = token?.ToString();
+                        if (string.IsNullOrEmpty(s)) continue;
+                        try
+                        {
+                            var g = new Guid(s);
+                            group.AddObject(g);
+                            added++;
+                        }
+                        catch { /* skip invalid */ }
+                    }
+                    if (!string.IsNullOrEmpty(colorHex))
+                    {
+                        try
+                        {
+                            var c = System.Drawing.ColorTranslator.FromHtml(colorHex);
+                            group.Colour = c;
+                        }
+                        catch { /* keep default */ }
+                    }
+                    group.CreateAttributes();
+                    doc.AddObject(group, false);
+                    group.ExpireCaches();
+                    RecordTurnChange(group.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = group.InstanceGuid.ToString(),
+                        ["nickname"] = nickname,
+                        ["members"] = added,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in GroupComponents: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Move a canvas object to a new pivot. Lightweight — single
+        /// component, single point. For layout-wide tidying use organize.
+        /// </summary>
+        private JObject MoveComponent(JObject cmd)
+        {
+            string guidStr = (string)cmd["instance_guid"];
+            float x = (float?)cmd["x"] ?? 0f;
+            float y = (float?)cmd["y"] ?? 0f;
+            if (string.IsNullOrEmpty(guidStr))
+                return ErrorResponse("`instance_guid` is required.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var obj = doc.FindObject(new Guid(guidStr), false);
+                    if (obj?.Attributes == null) { result = ErrorResponse($"No object with guid {guidStr}"); return; }
+                    obj.Attributes.Pivot = new System.Drawing.PointF(x, y);
+                    obj.Attributes.ExpireLayout();
+                    Grasshopper.Instances.ActiveCanvas?.Refresh();
+                    RecordTurnChange(obj.InstanceGuid);
+                    result = SuccessResponse(new JObject
+                    {
+                        ["instance_guid"] = guidStr,
+                        ["x"] = x,
+                        ["y"] = y,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(5000);
+            if (error != null) return ErrorResponse($"Error in MoveComponent: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        /// <summary>
+        /// Auto-layout components left → right by data-flow depth. Depth is
+        /// the longest path from a "source" (no in-set predecessors) to the
+        /// component. Components at the same depth stack vertically.
+        ///
+        /// Accepts an explicit `instance_guids` list to layout, or omits it
+        /// to layout every component on the canvas. Components NOT in the
+        /// set are ignored when computing depth (their positions stay put).
+        /// </summary>
+        private JObject OrganizeComponents(JObject cmd)
+        {
+            var guidsArr = cmd["instance_guids"] as JArray;
+            float startX = (float?)cmd["start_x"] ?? 100f;
+            float startY = (float?)cmd["start_y"] ?? 100f;
+            float colWidth = (float?)cmd["column_width"] ?? 250f;
+            float rowHeight = (float?)cmd["row_height"] ?? 110f;
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+
+                    // Collect the target set.
+                    var targets = new Dictionary<Guid, IGH_DocumentObject>();
+                    if (guidsArr != null && guidsArr.Count > 0)
+                    {
+                        foreach (var token in guidsArr)
+                        {
+                            var s = token?.ToString();
+                            if (string.IsNullOrEmpty(s)) continue;
+                            try
+                            {
+                                var g = new Guid(s);
+                                var o = doc.FindObject(g, false);
+                                if (o != null) targets[g] = o;
+                            }
+                            catch { }
+                        }
+                    }
+                    else
+                    {
+                        foreach (var o in doc.Objects) targets[o.InstanceGuid] = o;
+                    }
+                    if (targets.Count == 0)
+                    {
+                        result = ErrorResponse("No target objects to organize.");
+                        return;
+                    }
+
+                    // Compute depth via memoized DFS.
+                    var depth = new Dictionary<Guid, int>();
+                    int ComputeDepth(IGH_DocumentObject o, HashSet<Guid> visiting)
+                    {
+                        if (depth.TryGetValue(o.InstanceGuid, out var d)) return d;
+                        if (!visiting.Add(o.InstanceGuid))
+                        {
+                            // Cycle — bail out at current depth 0.
+                            depth[o.InstanceGuid] = 0;
+                            return 0;
+                        }
+                        int maxUpstream = -1;
+                        if (o is IGH_Component cc)
+                        {
+                            foreach (var input in cc.Params.Input)
+                            {
+                                foreach (var src in input.Sources)
+                                {
+                                    IGH_DocumentObject srcObj = src;
+                                    // If the source is a sub-param of a component, walk up.
+                                    if (src.Attributes?.GetTopLevel?.DocObject is IGH_DocumentObject top)
+                                        srcObj = top;
+                                    if (srcObj == null) continue;
+                                    if (!targets.ContainsKey(srcObj.InstanceGuid)) continue;
+                                    maxUpstream = Math.Max(maxUpstream, ComputeDepth(srcObj, visiting));
+                                }
+                            }
+                        }
+                        else if (o is IGH_Param pp)
+                        {
+                            foreach (var src in pp.Sources)
+                            {
+                                IGH_DocumentObject srcObj = src;
+                                if (src.Attributes?.GetTopLevel?.DocObject is IGH_DocumentObject top)
+                                    srcObj = top;
+                                if (srcObj == null) continue;
+                                if (!targets.ContainsKey(srcObj.InstanceGuid)) continue;
+                                maxUpstream = Math.Max(maxUpstream, ComputeDepth(srcObj, visiting));
+                            }
+                        }
+                        visiting.Remove(o.InstanceGuid);
+                        var result = maxUpstream + 1;
+                        depth[o.InstanceGuid] = result;
+                        return result;
+                    }
+
+                    foreach (var o in targets.Values)
+                        ComputeDepth(o, new HashSet<Guid>());
+
+                    // Group by depth, sort each column by current y for stability.
+                    var byDepth = new Dictionary<int, List<IGH_DocumentObject>>();
+                    foreach (var kv in depth)
+                    {
+                        if (!targets.TryGetValue(kv.Key, out var o)) continue;
+                        if (!byDepth.TryGetValue(kv.Value, out var list))
+                        {
+                            list = new List<IGH_DocumentObject>();
+                            byDepth[kv.Value] = list;
+                        }
+                        list.Add(o);
+                    }
+
+                    int placed = 0;
+                    foreach (var col in byDepth.OrderBy(p => p.Key))
+                    {
+                        var sorted = col.Value
+                            .OrderBy(o => o.Attributes?.Pivot.Y ?? 0)
+                            .ToList();
+                        for (int i = 0; i < sorted.Count; i++)
+                        {
+                            var o = sorted[i];
+                            if (o.Attributes == null) continue;
+                            o.Attributes.Pivot = new System.Drawing.PointF(
+                                startX + col.Key * colWidth,
+                                startY + i * rowHeight);
+                            o.Attributes.ExpireLayout();
+                            placed++;
+                        }
+                    }
+
+                    Grasshopper.Instances.ActiveCanvas?.Refresh();
+
+                    result = SuccessResponse(new JObject
+                    {
+                        ["placed"] = placed,
+                        ["columns"] = byDepth.Count,
+                        ["start_x"] = startX,
+                        ["start_y"] = startY,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(15000);
+            if (error != null) return ErrorResponse($"Error in OrganizeComponents: {error.Message}");
+            return result ?? ErrorResponse("Operation timed out");
+        }
+
+        // ============================================================
+        // v0.2.4 — fast outline tools. Replace the multi-call discovery
+        // chain (gh_canvas_summary -> gh_get_context simplified -> 111k
+        // chars -> subagent fork) with one cheap server-side call that
+        // returns clusters + endpoints + inputs in ~1k chars.
+        //
+        // Cluster definition: connected components on the WIRE graph.
+        // Two canvas objects are in the same cluster iff any wire path
+        // (treating wires as undirected) connects them.
+        //
+        // Output format is intentionally short — JSON with short integer
+        // IDs ("c1", "c2") instead of 36-char GUIDs in the structural
+        // section, plus a single `guids` lookup table at the end. Type
+        // names are stripped of "GH_" / "Component_" / "Param_" prefixes
+        // and the trailing "Component" word.
+        // ============================================================
+
+        // Cache: cluster_id -> list of GUIDs. Updated by canvas_outline /
+        // file_outline, read by cluster_flow. Lives at the process level
+        // — sufficient since the AI's discovery flow is "outline then
+        // immediately drill down" within one conversation.
+        private static readonly Dictionary<int, List<Guid>> _outlineClusterCache =
+            new Dictionary<int, List<Guid>>();
+        private static GH_Document _outlineCacheDoc = null;
+        private static readonly object _outlineCacheLock = new object();
+
+        private static string ShortKind(IGH_DocumentObject obj)
+        {
+            if (obj == null) return "?";
+            string t = obj.GetType().Name;
+            if (t.StartsWith("GH_")) t = t.Substring(3);
+            else if (t.StartsWith("Component_")) t = t.Substring(10);
+            else if (t.StartsWith("Param_")) t = t.Substring(6);
+            if (t.EndsWith("Component") && t.Length > 9) t = t.Substring(0, t.Length - 9);
+            return t;
+        }
+
+        // Union-find for clustering by wire graph.
+        private class DSU
+        {
+            private readonly Dictionary<Guid, Guid> _parent = new Dictionary<Guid, Guid>();
+            public void Add(Guid g) { if (!_parent.ContainsKey(g)) _parent[g] = g; }
+            public Guid Find(Guid g)
+            {
+                if (!_parent.ContainsKey(g)) _parent[g] = g;
+                while (_parent[g] != g)
+                {
+                    _parent[g] = _parent[_parent[g]];
+                    g = _parent[g];
+                }
+                return g;
+            }
+            public void Union(Guid a, Guid b)
+            {
+                var ra = Find(a); var rb = Find(b);
+                if (ra != rb) _parent[ra] = rb;
+            }
+        }
+
+        // Walk wires, build DSU, return clusters as List<List<top-level object>>.
+        private static List<List<IGH_DocumentObject>> ComputeClusters(GH_Document doc)
+        {
+            var dsu = new DSU();
+            var byGuid = new Dictionary<Guid, IGH_DocumentObject>();
+            foreach (var obj in doc.Objects)
+            {
+                dsu.Add(obj.InstanceGuid);
+                byGuid[obj.InstanceGuid] = obj;
+            }
+
+            Guid TopGuidOf(IGH_Param p)
+            {
+                IGH_DocumentObject top = p;
+                var parent = p.Attributes?.Parent?.DocObject;
+                if (parent is IGH_DocumentObject d) top = d;
+                return top.InstanceGuid;
+            }
+
+            void UnionWires(IGH_Param param, Guid topGuid)
+            {
+                foreach (var src in param.Sources)
+                {
+                    var srcTopGuid = TopGuidOf(src);
+                    if (byGuid.ContainsKey(srcTopGuid))
+                        dsu.Union(topGuid, srcTopGuid);
+                }
+                foreach (var rec in param.Recipients)
+                {
+                    var dstTopGuid = TopGuidOf(rec);
+                    if (byGuid.ContainsKey(dstTopGuid))
+                        dsu.Union(topGuid, dstTopGuid);
+                }
+            }
+
+            foreach (var obj in doc.Objects)
+            {
+                if (obj is IGH_Component c)
+                {
+                    foreach (var p in c.Params.Input) UnionWires(p, c.InstanceGuid);
+                    foreach (var p in c.Params.Output) UnionWires(p, c.InstanceGuid);
+                }
+                else if (obj is IGH_Param p)
+                {
+                    UnionWires(p, p.InstanceGuid);
+                }
+            }
+
+            var groups = new Dictionary<Guid, List<IGH_DocumentObject>>();
+            foreach (var obj in doc.Objects)
+            {
+                var root = dsu.Find(obj.InstanceGuid);
+                if (!groups.TryGetValue(root, out var list))
+                {
+                    list = new List<IGH_DocumentObject>();
+                    groups[root] = list;
+                }
+                list.Add(obj);
+            }
+            return groups.Values
+                .OrderByDescending(g => g.Count)
+                .ToList();
+        }
+
+        // Build the compact outline JSON for a document.
+        private static JObject BuildOutline(GH_Document doc, List<List<IGH_DocumentObject>> clusters)
+        {
+            // Allocate short IDs only for endpoints + inputs (the only objects we
+            // surface by reference). Order: c1, c2, ... assigned on first emit.
+            var shortIds = new Dictionary<Guid, string>();
+            var guidsTable = new JObject();
+            string EnsureShortId(IGH_DocumentObject obj)
+            {
+                if (shortIds.TryGetValue(obj.InstanceGuid, out var sid)) return sid;
+                sid = "c" + (shortIds.Count + 1);
+                shortIds[obj.InstanceGuid] = sid;
+                guidsTable[sid] = obj.InstanceGuid.ToString();
+                return sid;
+            }
+
+            var clusterArr = new JArray();
+            int clusterId = 0;
+            foreach (var cluster in clusters)
+            {
+                clusterId++;
+                // Kinds histogram, top entries by count.
+                var kindCounts = new Dictionary<string, int>();
+                float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+                foreach (var obj in cluster)
+                {
+                    var k = ShortKind(obj);
+                    kindCounts[k] = kindCounts.TryGetValue(k, out var n) ? n + 1 : 1;
+                    var p = obj.Attributes?.Pivot;
+                    if (p.HasValue)
+                    {
+                        if (p.Value.X < minX) minX = p.Value.X;
+                        if (p.Value.Y < minY) minY = p.Value.Y;
+                        if (p.Value.X > maxX) maxX = p.Value.X;
+                        if (p.Value.Y > maxY) maxY = p.Value.Y;
+                    }
+                }
+                // Endpoints: components/params with no downstream consumer
+                // INSIDE this cluster. Limit to first 5.
+                var clusterGuids = new HashSet<Guid>(cluster.Select(o => o.InstanceGuid));
+                var endpoints = new JArray();
+                int epCount = 0;
+                foreach (var obj in cluster)
+                {
+                    if (epCount >= 5) break;
+                    bool hasDownstream = false;
+                    var outputs = new List<IGH_Param>();
+                    if (obj is IGH_Component cc) outputs.AddRange(cc.Params.Output);
+                    else if (obj is IGH_Param pp) outputs.Add(pp);
+                    foreach (var op in outputs)
+                    {
+                        foreach (var rec in op.Recipients)
+                        {
+                            var top = rec.Attributes?.Parent?.DocObject is IGH_DocumentObject d
+                                ? d.InstanceGuid : rec.InstanceGuid;
+                            if (clusterGuids.Contains(top) && top != obj.InstanceGuid)
+                            { hasDownstream = true; break; }
+                        }
+                        if (hasDownstream) break;
+                    }
+                    if (!hasDownstream && outputs.Count > 0)
+                    {
+                        endpoints.Add(new JObject
+                        {
+                            ["c"] = EnsureShortId(obj),
+                            ["k"] = ShortKind(obj),
+                        });
+                        epCount++;
+                    }
+                }
+                // Inputs: widgets (sliders / toggles / value-lists / panels). Limit 10.
+                var inputs = new JArray();
+                int inCount = 0;
+                foreach (var obj in cluster)
+                {
+                    if (inCount >= 10) break;
+                    if (obj is GH_NumberSlider || obj is GH_BooleanToggle
+                        || obj is GH_ValueList || obj is GH_Panel)
+                    {
+                        inputs.Add(new JObject
+                        {
+                            ["c"] = EnsureShortId(obj),
+                            ["k"] = ShortKind(obj),
+                            ["n"] = obj.NickName ?? "",
+                        });
+                        inCount++;
+                    }
+                }
+                var kindsArr = new JArray();
+                foreach (var kv in kindCounts.OrderByDescending(p => p.Value).Take(8))
+                {
+                    kindsArr.Add(new JArray { kv.Key, kv.Value });
+                }
+                clusterArr.Add(new JObject
+                {
+                    ["i"] = clusterId,
+                    ["size"] = cluster.Count,
+                    ["bbox"] = new JArray { minX, minY, maxX, maxY },
+                    ["kinds"] = kindsArr,
+                    ["ends"] = endpoints,
+                    ["ins"] = inputs,
+                });
+            }
+            return new JObject
+            {
+                ["v"] = 1,
+                ["n"] = doc.ObjectCount,
+                ["cn"] = clusters.Count,
+                ["clusters"] = clusterArr,
+                ["guids"] = guidsTable,
+            };
+        }
+
+        private static void UpdateClusterCache(GH_Document doc, List<List<IGH_DocumentObject>> clusters)
+        {
+            lock (_outlineCacheLock)
+            {
+                _outlineClusterCache.Clear();
+                _outlineCacheDoc = doc;
+                int id = 0;
+                foreach (var cluster in clusters)
+                {
+                    id++;
+                    _outlineClusterCache[id] = cluster.Select(o => o.InstanceGuid).ToList();
+                }
+            }
+        }
+
+        private JObject CanvasOutline(JObject cmd)
+        {
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var doc = GetGHDocument();
+                    if (doc == null) { result = ErrorResponse("No active GH document."); return; }
+                    var clusters = ComputeClusters(doc);
+                    UpdateClusterCache(doc, clusters);
+                    result = SuccessResponse(BuildOutline(doc, clusters));
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in CanvasOutline: {error.Message}");
+            return result ?? ErrorResponse("Outline timed out");
+        }
+
+        // file_outline — same shape as canvas_outline but operates on a
+        // .gh / .ghx file read off disk. The bridge loads it into a TEMP
+        // GH_Document (never added to the canvas, never solved), parses
+        // clusters, then disposes the temp doc.
+        private JObject FileOutlineFromBase64(JObject cmd)
+        {
+            string b64 = (string)cmd["data"];
+            if (string.IsNullOrEmpty(b64))
+                return ErrorResponse("`data` is required (base64-encoded .gh / .ghx bytes).");
+
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(b64); }
+            catch (Exception ex) { return ErrorResponse($"Bad base64 payload: {ex.Message}"); }
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                string tmpPath = null;
+                try
+                {
+                    tmpPath = Path.Combine(Path.GetTempPath(), $"rhino-gh-mcp-outline-{Guid.NewGuid():N}.gh");
+                    File.WriteAllBytes(tmpPath, bytes);
+
+                    var archive = new GH_IO.Serialization.GH_Archive();
+                    if (!archive.ReadFromFile(tmpPath))
+                    {
+                        result = ErrorResponse("Failed to parse .gh / .ghx archive.");
+                        return;
+                    }
+                    var tempDoc = new GH_Document();
+                    if (!archive.ExtractObject(tempDoc, "Definition"))
+                    {
+                        result = ErrorResponse("Archive did not contain a 'Definition' root.");
+                        return;
+                    }
+                    var clusters = ComputeClusters(tempDoc);
+                    UpdateClusterCache(tempDoc, clusters);
+                    result = SuccessResponse(BuildOutline(tempDoc, clusters));
+                }
+                catch (Exception ex) { error = ex; }
+                finally
+                {
+                    if (tmpPath != null) { try { File.Delete(tmpPath); } catch { } }
+                    done.Set();
+                }
+            });
+            done.Wait(20000);
+            if (error != null) return ErrorResponse($"Error in FileOutline: {error.Message}");
+            return result ?? ErrorResponse("Outline timed out");
+        }
+
+        // cluster_flow — given a cluster_id returned by the most recent
+        // outline call, return the stage-based dataflow inside that
+        // cluster. Stages = topological depth within the cluster.
+        private JObject ClusterFlow(JObject cmd)
+        {
+            int clusterId = (int?)cmd["cluster_id"] ?? 0;
+            if (clusterId <= 0)
+                return ErrorResponse("`cluster_id` (positive integer from a prior outline) is required.");
+
+            List<Guid> memberGuids;
+            GH_Document doc;
+            lock (_outlineCacheLock)
+            {
+                if (!_outlineClusterCache.TryGetValue(clusterId, out memberGuids))
+                    return ErrorResponse($"Unknown cluster_id {clusterId}. Call canvas_outline or file_outline first.");
+                doc = _outlineCacheDoc;
+            }
+            if (doc == null) return ErrorResponse("Cluster cache has no document; outline first.");
+
+            JObject result = null;
+            Exception error = null;
+            var done = new System.Threading.ManualResetEventSlim(false);
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var memberSet = new HashSet<Guid>(memberGuids);
+                    var members = new List<IGH_DocumentObject>();
+                    foreach (var g in memberGuids)
+                    {
+                        var o = doc.FindObject(g, false);
+                        if (o != null) members.Add(o);
+                    }
+                    // Compute stage = longest upstream path inside cluster.
+                    var depth = new Dictionary<Guid, int>();
+                    int ComputeDepth(IGH_DocumentObject o, HashSet<Guid> visiting)
+                    {
+                        if (depth.TryGetValue(o.InstanceGuid, out var d)) return d;
+                        if (!visiting.Add(o.InstanceGuid)) { depth[o.InstanceGuid] = 0; return 0; }
+                        int maxUp = -1;
+                        IEnumerable<IGH_Param> ins = new IGH_Param[0];
+                        if (o is IGH_Component cc) ins = cc.Params.Input;
+                        else if (o is IGH_Param pp) ins = new[] { pp };
+                        foreach (var p in ins)
+                        {
+                            foreach (var src in p.Sources)
+                            {
+                                var top = src.Attributes?.Parent?.DocObject is IGH_DocumentObject t
+                                    ? t.InstanceGuid : src.InstanceGuid;
+                                if (!memberSet.Contains(top)) continue;
+                                var so = doc.FindObject(top, false);
+                                if (so != null)
+                                    maxUp = Math.Max(maxUp, ComputeDepth(so, visiting));
+                            }
+                        }
+                        visiting.Remove(o.InstanceGuid);
+                        var v = maxUp + 1;
+                        depth[o.InstanceGuid] = v;
+                        return v;
+                    }
+                    foreach (var m in members) ComputeDepth(m, new HashSet<Guid>());
+
+                    // Group by depth; within each stage, count by kind.
+                    var byStage = members
+                        .GroupBy(o => depth[o.InstanceGuid])
+                        .OrderBy(g => g.Key);
+                    var stagesArr = new JArray();
+                    foreach (var stage in byStage)
+                    {
+                        var kindCount = new Dictionary<string, int>();
+                        var nicknames = new List<string>();
+                        foreach (var o in stage)
+                        {
+                            var k = ShortKind(o);
+                            kindCount[k] = kindCount.TryGetValue(k, out var n) ? n + 1 : 1;
+                            if (o is GH_NumberSlider || o is GH_BooleanToggle
+                                || o is GH_ValueList)
+                            {
+                                if (!string.IsNullOrEmpty(o.NickName) && nicknames.Count < 8)
+                                    nicknames.Add(o.NickName);
+                            }
+                        }
+                        var kindArr = new JArray();
+                        foreach (var kv in kindCount.OrderByDescending(p => p.Value))
+                            kindArr.Add(new JArray { kv.Key, kv.Value });
+                        var stageObj = new JObject
+                        {
+                            ["s"] = stage.Key,
+                            ["kinds"] = kindArr,
+                        };
+                        if (nicknames.Count > 0)
+                        {
+                            var ns = new JArray();
+                            foreach (var n in nicknames) ns.Add(n);
+                            stageObj["nicks"] = ns;
+                        }
+                        stagesArr.Add(stageObj);
+                    }
+                    result = SuccessResponse(new JObject
+                    {
+                        ["cluster_id"] = clusterId,
+                        ["member_count"] = members.Count,
+                        ["stage_count"] = stagesArr.Count,
+                        ["stages"] = stagesArr,
+                    });
+                }
+                catch (Exception ex) { error = ex; }
+                finally { done.Set(); }
+            });
+            done.Wait(10000);
+            if (error != null) return ErrorResponse($"Error in ClusterFlow: {error.Message}");
             return result ?? ErrorResponse("Operation timed out");
         }
     }

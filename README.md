@@ -4,11 +4,13 @@
 > live Rhino 8 modeling session — for parametric design, architectural
 > research, and teaching.
 
-**Status**: v0.1.6 — Python MCP server, Grasshopper `.gha` plugin, and
-Rhino `.rhp` plugin all build clean and pass smoke tests on Mac and
-Windows. The capability gate, widget read/write, and first Skill
-(`landform`) are live. Streamable HTTP transport and `.dxt` packaging
-are next.
+**Status**: v0.2.4 — five-Scenario canvas surface (Inspect / Tune /
+Coach / Execute / Author), Coach-mode canvas highlights, Skills v2
+schema with Execute-mode `allow_tools` gating, and auto-wired
+Toggle + Scenario value-list on component drop. Two-click install via
+the [`.mcpb` Desktop Extension](https://github.com/modelcontextprotocol/mcpb)
+for Claude Desktop and [Yak packages](https://developer.rhino3d.com/guides/yak/)
+for Rhino Package Manager. See Quick start below.
 
 ---
 
@@ -23,21 +25,175 @@ current layer"*. The LLM uses the tools below to read your canvas, place
 and wire Grasshopper components, change parameters, capture the viewport,
 and run Rhino commands.
 
-Three workflow modes ship in v1, all enforced on the **canvas** as
-visible component inputs (not hidden in a config file):
+v0.2 surfaces a single **Scenario** dropdown on the canvas component —
+pick what you're trying to do, the engine derives the underlying
+capability flags:
 
-| Canvas flag | What it gates |
-|---|---|
-| `AllowParameters` | The LLM can adjust sliders, toggles, value-lists, panels |
-| `AllowComponents` | The LLM can place, wire, and remove components |
-| `AllowScripting` | The LLM can write Python/C# script components and execute code |
-| `ComponentScope` (0/1/2) | When components are allowed: curated allow-list / GH defaults only / anything installed |
+| Scenario | What you're trying to do | What the AI can touch |
+|---|---|---|
+| **Inspect** | "Explain this definition to me" | Read only — no writes |
+| **Tune** | "Adjust the parameters I already have" | Sliders / toggles / value-lists |
+| **Coach** (default) | "Walk me through edits, show me what changed" | Tune + add curated components, with **canvas highlights** on every change |
+| **Execute** | "Follow a Skill recipe, no improvisation" | Only the tools the active Skill declares |
+| **Author** | "Free hands" | Full canvas + scripting |
 
-You can flip any of these mid-conversation; the change propagates within
-about 3 seconds. No restart.
+You can flip the Scenario mid-conversation; the change propagates within
+about 3 seconds. The v0.1 component is still in the ribbon as
+`rhino-gh-mcp Server (v1)` for backwards compatibility with saved `.gh`
+files that already use it.
 
-See [docs/architecture.md](docs/architecture.md) for the full picture and
-[docs/handoff.md](docs/handoff.md) for the current status / next steps.
+See [docs/architecture.md](docs/architecture.md) for the full picture,
+[docs/v0.2-redesign.md](docs/v0.2-redesign.md) for the Scenario design,
+and [docs/handoff.md](docs/handoff.md) for the current status.
+
+---
+
+## Quick start — three files, three clicks
+
+> For designers and architecture students. No `git clone`, no `uv`,
+> no `dotnet`. You need: **Rhino 8** installed, **Claude Desktop**
+> installed, and **Python 3.11+** on your PATH. About 5 minutes.
+
+### Step 0 — Download these three files
+
+Go to the [latest GitHub release](https://github.com/xunliuDesign/rhino-gh-mcp/releases/latest)
+and download the three artifacts (replace `0.2.4` with whatever the
+current release version is):
+
+| File | What it is | Where it goes |
+|---|---|---|
+| `rhino-gh-mcp-0.2.4.mcpb` | Claude Desktop extension (Python MCP server bundled) | Claude Desktop |
+| `rhinogh-mcp-grasshopper-0.2.4-rh8_0-any.yak` | Grasshopper canvas plugin (`.gha`) | Rhino Package Manager |
+| `rhinogh-mcp-rhino-0.1.1-rh8_0-any.yak` | Rhino document plugin (`.rhp`) | Rhino Package Manager |
+
+That's everything you need on disk.
+
+### Step 1 — Install the Rhino + Grasshopper plugins
+
+Drag each `.yak` file onto an open Rhino 8 window. Rhino's Package
+Manager opens and installs the package — confirm the prompt. Do both
+files, then restart Rhino.
+
+*Alternatively*: once `yak push` is done (see
+[docs/packaging-status.md](docs/packaging-status.md)), run
+`_PackageManager` in Rhino and search **rhino-gh-mcp** to install
+both packages from the McNeel server.
+
+### Step 2 — Install the Python MCP server in Claude Desktop
+
+Double-click `rhino-gh-mcp-0.2.4.mcpb`. Claude Desktop opens the
+Extensions panel with the install prompt. Confirm. First launch
+pip-installs ~5 Python dependencies (~30 s, one-time).
+
+The extension surfaces four settings: control-level preset
+(`parameter` / `curated` / `full`), Grasshopper bridge port
+(default 9999), Rhino bridge port (default 9876), log level.
+
+### Step 3 — Bring up both bridges inside Rhino
+
+1. Run `_ToggleMcpService` in Rhino's command line. You should see
+   *"rhino-gh-mcp: MCP service running on 127.0.0.1:9876"*.
+2. Open Grasshopper (`_Grasshopper`).
+3. Find the **MCP** ribbon tab → **Server** group → drop the
+   **rhino-gh-mcp Server (v2)** component on a fresh canvas.
+4. A **Boolean Toggle** (Run, off) and a **Value List**
+   (Scenario, Coach selected) appear auto-wired to the left — flip
+   the Toggle to **True** and `Status` should read
+   `Server On 127.0.0.1:9999 | Scenario: Coach | Skill: (none)`.
+
+### Step 4 — Restart Claude Desktop and try a prompt
+
+Restart Claude Desktop so it picks up the extension. In a fresh chat:
+
+> Call `gh_status` and `rhino_status` to confirm both bridges are
+> alive, then `gh_canvas_summary` and `rhino_get_scene_info` to see
+> what's there. Then add a slider called `radius` with range 0–50 and
+> default 10, place a `Circle` component reading from that slider,
+> recompute, and capture the viewport so I can see the result.
+
+If both status checks succeed and a circle appears on the canvas,
+you're done.
+
+### Example prompts to get a feel for each Scenario
+
+Switch the Value List on the v2 component to the matching Scenario,
+then ask:
+
+**Coach** (the default — best for learning Grasshopper with an AI partner):
+> Bracket your work in a turn: call `gh_begin_turn` first. Build me
+> a parametric tower: a circular footprint with a radius slider, a
+> floor count slider, each floor a slab, and a twist angle slider.
+> When you're done call `gh_end_turn` so the components you added
+> light up on the canvas.
+
+**Execute** (set ActiveSkill = `landform` on the v2 component first):
+> Use the landform skill to build a single circular hill in the
+> middle of the canvas. Height around 30, radius around 60.
+
+**Tune** (no new components — just adjust what's there):
+> Walk through every slider on the canvas and tell me what it
+> controls, then bump each one by ~20 % and recompute so I can
+> see the effect.
+
+**Inspect** (no writes at all):
+> Explain this Grasshopper definition to me end-to-end — what does
+> each cluster of components do, where does the data flow, and
+> what would I change first to make the output less symmetric?
+
+**Author** (use only when you trust the AI to write code):
+> Write me a Python script component that takes a list of points
+> and returns the convex hull as a closed curve.
+
+---
+
+## Alternate quick start — let an AI install it from source
+
+If the `.mcpb` / Yak path above doesn't fit your setup — e.g. you want
+to hack on the bridge code, or you're on a build of Rhino that doesn't
+have Package Manager set up — you can still let an AI assistant do the
+full source install. You install one assistant app, drop the repo on
+disk, and ask the AI to do the rest.
+
+**1. Install an MCP-capable assistant.** [Claude Desktop](https://claude.ai/download)
+(Mac or Windows) is the simplest. Claude Code (inside VS Code) and the
+ChatGPT desktop app's MCP support also work.
+
+**2. Make sure Rhino 8 is already installed.** This project only
+supports Rhino 8 — Rhino 7 will not work.
+
+**3. Download this repo to a stable location** (e.g. `Documents/rhino-gh-mcp`).
+The easiest way without Git: go to the
+[GitHub page](https://github.com/xunliuDesign/rhino-gh-mcp) → green
+**Code** button → **Download ZIP** → unzip.
+
+**4. Point the assistant at the unzipped folder.**
+
+- *Claude Desktop:* open the folder picker / "Add project" panel and
+  select the unzipped repo. The assistant can then read files from it.
+- *Claude Code:* open a session inside that folder (`claude` from a
+  terminal in the folder, or open the folder in VS Code with the
+  Claude extension).
+
+**5. Paste the setup prompt below.** Fill in your OS where indicated.
+
+> Please read `README.md` and `docs/handoff.md` in this project, then
+> install rhino-gh-mcp on my machine. I'm on **macOS** *(or: Windows)*.
+> Do whatever you can without my involvement: install Python
+> dependencies with `uv`, build the Grasshopper `.gha` and Rhino `.rhp`
+> from source, copy the `.gha` into my Grasshopper Libraries folder,
+> register the `.rhp` with Rhino, and add this MCP server to my Claude
+> Desktop config so it appears as a tool source. When you're done, tell
+> me exactly which steps I need to do manually inside Rhino (e.g. start
+> the listener, drop the canvas component, restart the assistant).
+
+The assistant will run `uv sync`, build both plugins with `dotnet
+build`, copy each plugin to its OS-specific install path, register the
+Rhino plugin via Rhino's settings file, and edit your MCP config. Then
+it'll tell you the small handful of things only you can do — same as
+steps 3 and 4 of the two-click quick start above.
+
+If anything goes wrong, paste the assistant's error message back at it
+and point it at the **Troubleshooting** and **Install** sections below.
 
 ---
 
@@ -109,10 +265,24 @@ cd plugins/rhino
 ./reinstall.sh
 ```
 
-**First time only:** Rhino requires explicit registration. The script
-will print the path to the built `.rhp` and tell you to drag it onto
-Rhino's main window (or use `_PluginManager → Install...`). After the
-first registration, subsequent rebuilds auto-update in place.
+**First time only:** Rhino requires explicit registration before
+`_ToggleMcpService` becomes a recognized command.
+
+- **Windows:** drag the built `.rhp` (the script prints the absolute
+  path) onto Rhino's main window — Rhino will prompt to load and trust
+  the plug-in. After the first registration, subsequent rebuilds
+  auto-update in place.
+- **Mac:** the drag-onto-window path is unreliable on Rhino 8 macOS —
+  dropping inside the viewport opens the file as 3D geometry, and the
+  Plug-in Manager dialog has no Install button. The reliable path is
+  to (a) put the `.rhp` at
+  `~/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/RhinoGhMcpRhino (3f88bb55-3368-4204-9d0a-55911c9349ee)/RhinoGhMcpRhino.rhp`
+  and (b) add a registry entry for it inside the
+  `<child key="PlugInRegistry"><child key="6">` block of
+  `~/Library/Application Support/McNeel/Rhinoceros/8.0/settings/settings-Scheme__Default.xml`
+  (with `LoadMode=1`, `IsDotNETPlugIn=True`, and `FileName` pointing at
+  the absolute path above). The AI install path described in the Quick
+  start above does both of these for you.
 
 ### 5. Connect a client
 
@@ -121,9 +291,7 @@ first registration, subsequent rebuilds auto-update in place.
 inside the repo directory and approve the trust prompt. The `rhino-gh`
 server will be available in that session.
 
-**Claude Desktop (classic builds)** — add to
-`~/Library/Application Support/Claude/claude_desktop_config.json` (Mac)
-or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+**Claude Desktop** — add an `mcpServers` block to your config file:
 
 ```json
 {
@@ -143,13 +311,19 @@ or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 }
 ```
 
-Restart Claude Desktop. The `rhino-gh` tools should appear in the tools
-panel.
+On Mac, `uv` should be the absolute path (`/Users/<you>/.local/bin/uv`
+or similar) — the GUI app doesn't always inherit your shell's `PATH`.
 
-> **Note for the Cowork preview build of Claude Desktop**: that build
-> doesn't read `mcpServers` from `claude_desktop_config.json`. It uses
-> the Extensions / `.dxt` system instead. `.dxt` packaging is on the
-> roadmap; for now, use Claude Code with this build.
+Config file location depends on the Claude build you have installed:
+
+| Build | Mac | Windows |
+|---|---|---|
+| Claude Desktop (classic) | `~/Library/Application Support/Claude/claude_desktop_config.json` | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Unified Anthropic Claude app (with Cowork / Claude Code integration) | `~/Library/Application Support/Claude-3p/claude_desktop_config.json` | `%APPDATA%\Claude-3p\claude_desktop_config.json` |
+
+If you have both directories present, use the `Claude-3p` one — the
+preferences file inside plain `Claude/` is rewritten by the app and
+will strip unknown keys. Restart the assistant after editing.
 
 **Cursor / other clients** — point them at the same command and args as
 the Claude Desktop block above.
@@ -232,10 +406,19 @@ rhino-gh-mcp/
 ├── skills/                          # Anthropic Agent Skills bundles
 │   ├── landform/
 │   └── ladybug-environmental/
-├── mcpb/manifest.json               # Desktop Extension manifest (in progress)
+├── mcpb/                            # .mcpb / .dxt Desktop Extension source
+│   ├── manifest.json                # MCPB v0.3 manifest
+│   ├── bootstrap.py                 # First-launch dep installer
+│   └── requirements.txt             # Server runtime deps
+├── scripts/
+│   ├── build-mcpb.sh                # → dist/rhino-gh-mcp-<v>.mcpb
+│   ├── build-yak.sh                 # → dist/rhinogh-mcp-*-<v>-*.yak
+│   └── sync.{sh,ps1}                # One-shot dev sync after pulling
+├── dist/                            # Built install packages (gitignored binaries)
 ├── docs/
 │   ├── architecture.md
 │   ├── handoff.md                   # Status + session log
+│   ├── packaging-status.md          # .mcpb + Yak release status / next steps
 │   ├── performance-notes.md
 │   └── generalization.md
 └── .mcp.json                        # Project-scoped Claude Code MCP config
@@ -283,7 +466,7 @@ honored. Older versions need `uv sync --extra dev`.
 | **P4** | 🟡 | Surface expansion — done: list_toggles/value_lists, canvas_summary, find_components, set_toggle, select_value_list, list_blocks, set_view. Remaining: bake_to_rhino, group_components, measure_distance |
 | **P5** | 🟡 | Skills library — done: landform, ladybug-environmental (draft). Planned: massing, façade, structural grid, daylighting |
 | **P6** | ⏳ | Streamable HTTP transport + a thin web frontend |
-| **P7** | ⏳ | `.dxt` packaging for one-click Claude Desktop install |
+| **P7** | ✅ | `.mcpb` Desktop Extension + Yak packages — see `scripts/build-mcpb.sh`, `scripts/build-yak.sh`, [docs/packaging-status.md](docs/packaging-status.md) |
 | **P8** | ⏳ | Student-facing teaching bundle |
 
 ---

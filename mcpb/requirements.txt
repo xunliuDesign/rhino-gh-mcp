@@ -1,0 +1,8 @@
+# rhino-gh-mcp server runtime dependencies — kept in sync with
+# server/pyproject.toml. The bootstrap launcher installs this once into
+# server/lib on first run.
+mcp[cli]>=1.20.0
+httpx>=0.27.0
+pillow>=10.0.0
+pydantic>=2.6.0
+pyyaml>=6.0

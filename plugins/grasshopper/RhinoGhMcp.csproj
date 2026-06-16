@@ -19,7 +19,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>0.1.8</Version>
+    <Version>0.2.4</Version>
     <Title>rhino-gh-mcp</Title>
     <Company>Xun Liu</Company>
     <Description>MCP server bridge for Grasshopper. Companion to the rhino-gh-mcp Python server.</Description>

@@ -1,5 +1,6 @@
 ---
 name: landform
+version: 0.2.0
 description: |
   Build a parametric landform definition on a Grasshopper canvas using the
   bundled MCP landscape user-objects. Drives the LLM through the canonical
@@ -7,10 +8,13 @@ description: |
   chain. Best used when the user wants to design or iterate on a terrain
   surface, urban ground plane, garden topography, or any large mesh that
   needs to be sculpted by point/curve influence.
-recommended_capabilities:
+modes: [coach, execute]
+required_plugins: []
+required_capabilities:
   allow_parameters: true
   allow_components: true
   allow_scripting: false
+allowed_categories: [Curve, Surface, MCP, Vector, Math]
 recommended_scope: curated
 recommended_category_filter: "MCP"
 bundled_assets:
@@ -22,6 +26,45 @@ bundled_assets:
   - "MCP_UserObjects_Landscape example/Noise Modifier.ghuser"
   - "MCP_UserObjects_Landscape example/Landform Render.ghuser"
   - "MCP_UserObjects_Landscape example/Vis Contour.ghuser"
+# Execute mode: only these real MCP tool names are unblocked when scenario=execute
+# AND active_skill=landform. Read tools are always allowed (no need to list).
+allow_tools:
+  - gh_add_component
+  - gh_add_slider
+  - gh_add_any_component
+  - gh_connect_components
+  - gh_set_slider
+  - gh_set_slider_range
+  - gh_set_component_parameter
+  - gh_remove_node
+  - gh_recompute
+  - rhino_set_view
+  # v0.2.3: productivity tools landform workflows benefit from.
+  - gh_bake_to_rhino           # finalize the landform mesh into Rhino
+  - gh_add_panel               # annotate sections of the canvas
+  - gh_group_components        # cluster basemesh / placer / modifiers groups
+  - gh_organize_components     # tidy after a multi-step build
+  - gh_move_component
+  - gh_reference_rhino_object  # let user-drawn curves drive placers
+commands:
+  build_default_hill:
+    description: "Build the default circular-hill landform chain (BaseMesh -> Circle -> Grid Placer -> Absolute Modifier -> Render). Equivalent to the 'Worked example' below — useful for Execute mode where the user wants the canonical setup with no improvisation."
+    args:
+      height: "Maximum hill height in model units. Default 30."
+      radius: "Circle radius driving the placement. Default 60."
+    steps_summary: |
+      Places the 5 canonical components on a left-to-right row at x=100..900,
+      adds 4 sliders (size, resolution, radius, height), wires the required
+      chain including the base->modifier inputMesh feedback, recomputes,
+      captures the viewport. See "Worked example" section below for the
+      exact tool sequence.
+  resculpt_height:
+    description: "Adjust the height parameter on the active Absolute Modifier without restructuring the chain. Pure parameter edit — safe in Tune mode."
+    args:
+      height: "New height value. Constrained to the slider's range."
+    steps_summary: |
+      Finds the height slider on the canvas, sets its value, recomputes,
+      captures the viewport. No component placement.
 ---
 
 # Parametric Landform Skill
