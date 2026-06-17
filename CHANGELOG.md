@@ -11,6 +11,33 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com).
 
 ---
 
+## [0.2.5] — 2026-06-16
+
+### Fixed
+
+- **`gh_add_component`** now prefers non-obsolete proxies. Grasshopper
+  keeps deprecated component versions around as `Obsolete=true` for
+  backwards compatibility — and `FirstOrDefault` was picking whichever
+  proxy came first in the enumeration, which depended on assembly load
+  order and frequently selected the "Old" version. Filter on `Obsolete`
+  first, fall back only when every match is obsolete.
+
+### Changed
+
+- **`gh_list_available_components`** now reports each proxy's
+  `Obsolete` flag so the LLM can see + avoid deprecated versions when
+  composing prompts.
+
+### Note on Grasshopper 1 vs 2
+
+This server runs against **Grasshopper 1** — the canvas everyone has
+shipped with Rhino 6 / 7 / 8. Grasshopper 2 (Rhino 9 WIP, technology
+preview in Rhino 8) is a separate API and is **not currently
+supported**. McNeel's official RhinoMCP ships parallel GH1 + GH2 tool
+sets; adding GH2 here is a future v0.3+ effort.
+
+---
+
 ## [0.2.4] — 2026-06-15
 
 ### Added

@@ -726,11 +726,20 @@ namespace RhinoGhMcp
                         scopePredicate = (p) => true;
                     }
 
-                    var proxy = server.ObjectProxies.FirstOrDefault(p =>
+                    // v0.2.5 fix: prefer non-obsolete proxies. GH keeps
+                    // deprecated component versions around as `Obsolete=true`
+                    // for backwards compat (e.g. there's both a current
+                    // "Circle" and an "Old" Circle). FirstOrDefault would pick
+                    // whichever came first in the enumeration, which depends
+                    // on assembly load order. Filter on Obsolete and fall back
+                    // only if the only available match is obsolete.
+                    var matching = server.ObjectProxies.Where(p =>
                         p?.Desc != null &&
                         scopePredicate(p) &&
                         (p.Desc.Name == name || p.Desc.NickName == name)
-                    );
+                    ).ToList();
+                    var proxy = matching.FirstOrDefault(p => !p.Obsolete)
+                                ?? matching.FirstOrDefault();
                     if (proxy == null)
                     {
                         string scopeDesc = effectiveScope == 2 ? "ANY scope"
@@ -1292,6 +1301,7 @@ namespace RhinoGhMcp
                                     ["Name"] = desc.Name,
                                     ["NickName"] = desc.NickName,
                                     ["Guid"] = proxy.Guid.ToString(),
+                                    ["Obsolete"] = proxy.Obsolete,  // v0.2.5: flag deprecated proxies
                                     ["Description"] = desc.Description,
                                     ["Category"] = desc.Category,
                                     ["SubCategory"] = desc.SubCategory,

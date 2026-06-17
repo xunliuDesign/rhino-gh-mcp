@@ -4,7 +4,7 @@
 > live Rhino 8 modeling session — for parametric design, architectural
 > research, and teaching.
 
-**Status**: v0.2.4 — five-Scenario canvas surface (Inspect / Tune /
+**Status**: v0.2.5 — five-Scenario canvas surface (Inspect / Tune /
 Coach / Execute / Author), Coach-mode canvas highlights, Skills v2
 schema with Execute-mode `allow_tools` gating, and auto-wired
 Toggle + Scenario value-list on component drop. Two-click install via
@@ -85,7 +85,7 @@ window — same install dialog, no network needed.
 
 ### Step 2 — Install the Python MCP server in Claude Desktop
 
-Double-click `rhino-gh-mcp-0.2.4.mcpb`. Claude Desktop opens the
+Double-click `rhino-gh-mcp-0.2.5.mcpb`. Claude Desktop opens the
 Extensions panel with the install prompt. Confirm. First launch
 pip-installs ~5 Python dependencies (~30 s, one-time).
 
