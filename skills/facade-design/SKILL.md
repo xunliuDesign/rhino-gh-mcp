@@ -20,12 +20,8 @@ description: |
   even if they don't say the word "facade" — or when they ask to "tile /
   array / repeat a module across a surface," or to "build a facade onto
   this existing building / mass / surface." Do NOT use it for solar /
-  daylight / wind analysis (that's the ladybug-environmental skill), for
-  terrain shaping (landform), for site-scale building placement
-  (urban-massing), or for the deep facade vocabulary reference catalog
-  with worked .ghx files (that's the parametric-facade skill — this one
-  drives the orchestration; reach for parametric-facade's reference files
-  when a typology needs more depth than what's encoded here).
+  daylight / wind analysis (that's the ladybug-environmental skill) or
+  for terrain shaping (landform).
 recommended_capabilities:
   allow_parameters: true
   allow_components: true
