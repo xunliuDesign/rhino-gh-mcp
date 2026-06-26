@@ -1,157 +1,74 @@
-# rhino-gh-mcp Bridge Quirks
+# Facade-Specific Bridge Notes
 
-Cross-cutting bridge-version-specific behaviors that have bitten LLM builds.
-These are NOT about Grasshopper itself — they're about the
-`rhino-gh-mcp` bridge's name resolution, persistent-data handling, and
-gating. Update when the bridge version bumps; current notes apply to
-**plugin v0.2.4** unless marked otherwise.
+The **full** rhino-gh-mcp bridge quirks list — component name traps,
+persistent-data Panel-mode fallback, MCPv2 Scenario gating,
+ComponentScope, broken/stubbed tools, result-size cap — lives in the
+[`rhino-gh-bridge-basics`](../../../rhino-gh-bridge-basics/reference/bridge-quirks.md)
+skill. **Read that first.** Anything in this file is *additional*
+context that's specific to facade recipes.
 
-## Component name traps
+If `rhino-gh-bridge-basics` is loaded for this session (it should be —
+it's the prerequisite for every rhino-gh-mcp build), you have all the
+general traps already.
 
-Bridge name resolution is fuzzy and sometimes picks the wrong variant.
-**Always check the returned `kind` after placement.** If it's not what
-you expected, remove and try an alternate name.
+## Facade-specific points
 
-| What you ask for | What you might get | Why | Fix |
-|---|---|---|---|
-| `Extrude` | `Extrude Linear` (Component_ExtrudeLinear) — takes Line `Axis`, not Vector `Direction` | Bridge prefers newer variant by nickname match | Use `Extr` (legacy nickname) — returns `Component_Extrude` with Vector input |
-| `Triangle Panels A` | `not found in ANY scope` | LunchBox only has the `B` variant in this build | Use `Triangle Panels B` (note: no `LB ` prefix needed) |
-| `LB Triangle Panels A` / `LB Surface Panels` | `not found in ANY scope` | LunchBox component names don't take the `LB ` prefix | Try without prefix, or use `Triangle Panels B` / `Quad Panels A` / `Hexagon Cells` / `Diamond` / `Staggered Quads` |
-| `Divide Domain²` (unicode ²) | Client times out; component IS placed but client-side retry creates duplicates | Bridge parses but hangs the JSON pipe on the ² | Send ONE call, accept the timeout, verify via `gh_find_components("Divide Domain")`. Or use `Divide Surface` for point grid instead of domain subdivision |
-| `Scale` | `Component_Scale` (uniform) — correct usually | Bridge resolves correctly | Confirm via `kind`. Don't assume — `Scale NU` is a different component |
-| `Scale NU` | `Component_ScaleNU` (non-uniform X/Y/Z) — correct | Bridge resolves correctly | Only use when you genuinely need non-uniform scaling |
-| `Area` | `Component_AreaProperties_OBSOLETE` | Bridge prefers obsolete kind by name match | Functionally identical for Area/Centroid output. Leave it, or try `Surface AreaMoments` for non-obsolete variant |
-| `Minimum` | `Component_Min_OBSOLETE` | Same | Functionally identical for `min(A, B)`. Leave it |
-| `Sort List` | `Component_SortList_OBSOLETE` | Same | Functionally identical |
-| `List Item` | `Component_ListItem_OBSOLETE_ASWELL` | Same | Functionally identical |
-| `Reparameterize` | `not found in ANY scope` | Not a standalone component | Use a different domain-extraction path |
-| `Merge` | `Component_MergeN` (Merge Multiple — dynamic Stream 0/1/...) | OK but auto-expanding inputs | Use `append=True` on subsequent wires to same stream to grow N |
-| `Boundary Surfaces` | `Component_BoundarySurfaces` — correct | OK | This is the differencing component — feed multiple closed nested curves and it builds a planar Brep with holes natively |
+The general quirks list already covers everything that happens here.
+The handful of items below are repeated for emphasis because they
+trigger in **every** facade recipe and are the most-encountered facade
+failure modes:
 
-## Persistent data: the Panel-mode fallback
+### Extrude is the terminator — get the right variant
 
-Setting persistent data on a geometry-reference param (`Param_Brep`,
-`Param_Curve`, `Param_Surface`) via:
+Every recipe in this skill ends in a thickening step. **Use legacy
+`Extrude` (`Component_Extrude`), NOT `Extrude Linear`
+(`Component_ExtrudeLinear`).**
 
-```
-gh_set_component_parameter(param_guid, "", "<rhino-guid>")
-```
+- Legacy `Extrude.Direction` takes a `Vector` (Unit Z × thickness, or
+  Amplitude(normal, thickness)).
+- `Extrude Linear.Axis` takes a `Line` and has an Orientation gotcha
+  that reprojects the profile.
 
-falls back to **Panel mode**: the bridge creates a `GH_Panel` widget
-with the GUID text and wires it into the param's data input. The param
-auto-resolves the panel text as a Rhino-doc geometry reference.
+Bridge name resolution prefers `Extrude Linear` when you ask for
+`Extrude`. Defensive move: ask for nickname `Extr` to force the
+legacy variant, then verify the returned `kind` is `Component_Extrude`
+(NOT `Component_ExtrudeLinear`).
 
-**Known limitations**:
-1. **Only the first GUID is resolved** if you pass a newline-separated
-   multi-GUID string. So you can't pack N hosts into one param this way.
-   For N hosts, use N separate refs + `Merge Multiple`.
-2. **Each persistent-data set creates a new Panel** — re-setting the
-   same param overwrites the text but the Panel stays. Cleanup happens
-   when you remove the param.
+The one exception is **folded Variant B (Origami Faceted)**, which
+uses `Extrude To Point` (`Component_ExtrudeToPoint`) to produce
+pyramidal apexes. That's a different Extrude variant — recipe says so
+explicitly.
 
-## MCPv2 Server gates
+### Boundary Surfaces is the differencing component
 
-The v2 server (`McpServerComponentV2`) uses a `Scenario` value-list to
-choose a permission preset. Five scenarios exist:
+Used in `perforated-attractor`, `voronoi`, and `folded Variant B`.
+`Boundary Surfaces.Edges` accepts a list of closed nested curves
+(outer + inner) and emits a single planar Brep with a hole — no
+`Surface Split`, no `Sort by Area`, no `List Item -1` needed.
 
-| Scenario | Allows writes? | Allows scripting? |
-|---|---|---|
-| Inspect | No | No |
-| Tune | Slider/parameter changes only | No |
-| Coach | No (read-only with feedback) | No |
-| **Execute** | **Yes** | No |
-| **Author** | **Yes** | Yes |
+The trick: feed the outer cell curve as the first input, append the
+inner offset/scaled curve as the second (via `append=True`). The
+result is one Brep with the inner curve as a hole, ready for
+Extrude. See the perforated-attractor recipe's "Boundary Surfaces
+trick" section for the wiring detail.
 
-For any session that places components or runs scripts, the user must
-have `Scenario = Execute` or `Author`. The bridge will silently fail
-component placement and parameter sets in restrictive modes.
+### Host ingest for vertical walls — see host-ingest.md
 
-V2 also has `OverrideAllowParameters / Components / Scripting /
-ComponentScope` inputs for fine-grained overrides — these win over the
-Scenario preset.
+Kinetic and louver recipes assume a vertical wall host (XZ or YZ
+plane). When substituting the from-scratch Rectangle with an
+existing Rhino host, ensure the host's outward normal is horizontal
+(parallel to the world XY plane), or the kinetic petals point in the
+wrong direction.
 
-## ComponentScope & CategoryFilter
-
-Even with writes allowed, plugin components are gated by
-`ComponentScope`:
-
-| Scope | Value | What's placeable |
-|---|---|---|
-| Curated | 0 | Only components in `CategoryFilter` allow-list |
-| Defaults | 1 | All stock Grasshopper components |
-| All | 2 | Stock + every installed plugin |
-
-LunchBox / Pufferfish / Weaverbird / Ladybug all require **scope=all**.
-If `gh_add_component("Triangle Panels B")` returns `not found in ANY
-scope` but you know LunchBox is installed, the scope is too tight.
-
-`gh_add_any_component` bypasses `CategoryFilter` (when scope=all) for an
-explicit "I know this is a plugin and I want it" intent.
-
-## Broken / stubbed tools (this build)
-
-- `gh_capture_canvas` — returns `"GH_Canvas.GenerateHiResImage not
-  available in this Grasshopper build."`. Use `rhino_capture_viewport`
-  for visual confirmation instead.
-- `gh_execute_code` — returns `"execute_code is not supported in C#
-  MCP server."`. Use `gh_write_script_py3` for CPython operations on a
-  placed script component.
-- `gh_update_script` / `gh_write_script_py2` — bridge reports
-  `"Script updated."` but the code change may not actually take effect
-  on Rhino 8's `ZuiPythonComponent`. **Prefer `gh_write_script_py3`**
-  and verify with `gh_get_runtime_messages` after recompute (look for
-  stale output as the tell).
-- `rhino_execute_code` — gated by `AllowScripting` (Scenario=Author or
-  explicit override). Returns `"capability denied"` otherwise.
-
-## Result-size cap
-
-`gh_get_context` exceeds the bridge's response cap on busy canvases
-(>~50 components). Use:
-- `gh_canvas_summary` for overview / error counts / widget list
-- `gh_find_components(query)` for kind-based GUID lookup
-- `gh_get_objects([guids])` for detailed inputs/outputs/sources/targets
-  on a specific cluster
-
-These three together cover what `gh_get_context` does without hitting
-the cap.
-
-## Pivot/position fields not exposed
-
-`gh_get_objects` returns the full component schema including
-inputs/outputs/sources/targets but **does NOT include the on-canvas
-pivot (X, Y) position**. To identify which of N same-kind components is
-"the one at (500, 300)", you have to rely on creation order:
-`gh_find_components` returns results in creation order, so the
-n-th-placed instance is at index n in the find result.
-
-This matters when batching identical components (e.g. 4 Brep refs in
-sequence). For deterministic identification, place sequentially OR
-nickname each immediately after placement via
-`gh_set_component_parameter(guid, "NickName", "[my-tag]")`.
-
-## "Probe then verify" pattern
-
-The defensive default for ANY component placement that might trap on
-naming:
-
-```
-1. gh_add_component(intended_name)
-2. gh_find_components(intended_name) — get GUID
-3. gh_get_objects([guid]) — read kind, confirm not _OBSOLETE / not wrong variant
-4. If wrong: gh_remove_node(guid), try alternate name
-5. If right: proceed to wire
-```
-
-Cheaper than building a long chain on the wrong component and
-discovering at recompute time.
+For the substitution patterns themselves (`Param_Brep` / `Geometry
+Pipeline` / N-refs + Merge), see the basics skill's
+[`host-ingest.md`](../../../rhino-gh-bridge-basics/reference/host-ingest.md).
+The general patterns work unchanged for facades — the skill-specific
+note is just the vertical-normal constraint above.
 
 ## When the bridge updates
 
-This file dates fast. Re-validate every quirk on bridge version bumps.
-Quick smoke test:
-- Place `Triangle Panels B`, `Scale`, `Extrude`, `Area`, `Minimum`,
-  `Pull Point`, `Boundary Surfaces`, `Divide Domain²`
-- Confirm each returned `kind` matches the expected (non-OBSOLETE,
-  non-Linear for Extrude)
-- Update this file's tables where the resolution has shifted
+Re-validate the general quirks in `rhino-gh-bridge-basics/reference/
+bridge-quirks.md` on bridge version bumps. Any facade-specific
+shifts (e.g. a new `Extrude` variant the bridge starts preferring)
+get added here.
