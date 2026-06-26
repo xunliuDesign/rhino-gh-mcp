@@ -21,20 +21,44 @@ thickened along the host's outward normal.
 Every driver — `u_count`, `v_count`, `hole_min`, `hole_max`,
 `attractor_clamp`, `thickness` — is a labelled slider.
 
-## The 5 stages
+## Wiring — TRANSCRIBE THIS (the build)
 
-The PNG and the .gh both lay this out as five horizontally-grouped stages:
+*(Moved to top — this is the recipe's core. Read the table top-to-bottom and
+place + wire components in this exact order. The Components list below
+disambiguates ambiguous kinds; Stages overview at the bottom is context only.)*
 
-```
-01. Base Surface & Brep   →   02. Panelization   →   03. Logic (Setting Attractor)
-                                                          ↓
-                              05. Detailing      ←   04. Construct
-                              (Adding Thickness)     (Attraction of Offsetted Curves
-                                                     → Differencing the Geometries)
-```
+Source on the left, target on the right; the chain is sequential except
+where one output forks to multiple targets.
 
-Build in this order. Recompute at the end of stage 2, 3, and 4 to catch tree
-mismatches early.
+| # | Source | → | Target | Notes |
+|---|---|---|---|---|
+| 1 | `Brep` (host) | → | `Triangle Panels B.Surface` | Or HexCells / QuadA / Diamond / QuadStag — same downstream |
+| 2 | `u_count` slider | → | `Triangle Panels B.U Divisions` | Default 6, range 3–30 |
+| 3 | `v_count` slider | → | `Triangle Panels B.V Divisions` | Default 4, range 3–20 |
+| 4 | `Triangle Panels B.Panels` | → | `Area.Geometry` | |
+| 4a | `Triangle Panels B.Panels` | → | `Cells from Panelization` (Param_Curve waypoint) | The cells we'll SCALE |
+| 4b | `Triangle Panels B.Panels` | → | `Original Curve` (Param_Curve waypoint) | The cells we keep AS-IS for the outer boundary |
+| 5 | `Area.Centroid` | → | `Pull Point.Point` | Per-cell sample point |
+| 5a | `Area.Centroid` | → | `Scale.Center` | **Same** centroid — each cell scales about itself |
+| 6 | `Curve` (attractor) | → | `Pull Point.Geometry` | Set persistent data to an existing Rhino curve coplanar with and lying on the host surface. Single curve OR list of curves (Pull Point handles both — closest of all reported) |
+| 7 | `Pull Point.Distance` | → | `Minimum.A` *(optional clamp)* | |
+| 7a | `attractor_clamp` slider | → | `Minimum.B` | Distances above this value flatten to the cap |
+| 8 | `Minimum.Result` (or `Pull Point.Distance` if no clamp) | → | `Bounds.Numbers` | |
+| 8a | (same source as 8) | → | `Remap Numbers.Value` | |
+| 9 | `Bounds.Domain` | → | `Remap Numbers.Source` | |
+| 10 | `hole_max` slider | → | `Construct Domain.Domain start` (A) | **A = hole_max** (reversed — large value first) |
+| 10a | `hole_min` slider | → | `Construct Domain.Domain end` (B) | |
+| 11 | `Construct Domain.Domain` | → | `Remap Numbers.Target` | |
+| 12 | `Cells from Panelization` | → | `Scale.Geometry` | |
+| 13 | `Remap Numbers.Mapped` | → | `Scale.Factor` | Per-cell scale (0–1) |
+| 14 | `Scale.Geometry` (scaled cells output) | → | `Scaled Curves` waypoint | |
+| 15 | `Scaled Curves` | → | `Boundary Surfaces.Edges` | **First** of two sources |
+| 15a | `Original Curve` | → | `Boundary Surfaces.Edges` | **Second** source — `append=True` |
+| 16 | `Boundary Surfaces.Surfaces` | → | `Extrude.Base` | Planar Brep with hole — see "Boundary Surfaces trick" below |
+| 17 | `extrude_direction_vector` (see "Extrude direction") | → | `Extrude.Direction` | Vector whose length = thickness |
+
+That's the entire chain. ~12 components + sliders + 3 named waypoints.
+No `Surface Split`. No `Sort List`. No `List Item`. No fragment selection.
 
 ## Components list (exact kinds)
 
@@ -64,41 +88,6 @@ have OBSOLETE or "Linear" variants that look right but break the chain.
 
 These aren't decoration; they make every following edit one click away from
 the right wire.
-
-## Wiring (single surface)
-
-Read the table top-to-bottom. Source on the left, target on the right; the
-chain is sequential except where one output forks to multiple targets.
-
-| # | Source | → | Target | Notes |
-|---|---|---|---|---|
-| 1 | `Brep` (host) | → | `Triangle Panels B.Surface` | Or HexCells / QuadA / Diamond / QuadStag — same downstream |
-| 2 | `u_count` slider | → | `Triangle Panels B.U Divisions` | Default 6, range 3–30 |
-| 3 | `v_count` slider | → | `Triangle Panels B.V Divisions` | Default 4, range 3–20 |
-| 4 | `Triangle Panels B.Panels` | → | `Area.Geometry` | |
-| 4a | `Triangle Panels B.Panels` | → | `Cells from Panelization` (Param_Curve waypoint) | The cells we'll SCALE |
-| 4b | `Triangle Panels B.Panels` | → | `Original Curve` (Param_Curve waypoint) | The cells we keep AS-IS for the outer boundary |
-| 5 | `Area.Centroid` | → | `Pull Point.Point` | Per-cell sample point |
-| 5a | `Area.Centroid` | → | `Scale.Center` | **Same** centroid — each cell scales about itself |
-| 6 | `Curve` (attractor) | → | `Pull Point.Geometry` | Set persistent data to an existing Rhino curve coplanar with and lying on the host surface. Single curve OR list of curves (Pull Point handles both — closest of all reported) |
-| 7 | `Pull Point.Distance` | → | `Minimum.A` *(optional clamp)* | |
-| 7a | `attractor_clamp` slider | → | `Minimum.B` | Distances above this value flatten to the cap |
-| 8 | `Minimum.Result` (or `Pull Point.Distance` if no clamp) | → | `Bounds.Numbers` | |
-| 8a | (same source as 8) | → | `Remap Numbers.Value` | |
-| 9 | `Bounds.Domain` | → | `Remap Numbers.Source` | |
-| 10 | `hole_max` slider | → | `Construct Domain.Domain start` (A) | **A = hole_max** (reversed — large value first) |
-| 10a | `hole_min` slider | → | `Construct Domain.Domain end` (B) | |
-| 11 | `Construct Domain.Domain` | → | `Remap Numbers.Target` | |
-| 12 | `Cells from Panelization` | → | `Scale.Geometry` | |
-| 13 | `Remap Numbers.Mapped` | → | `Scale.Factor` | Per-cell scale (0–1) |
-| 14 | `Scale.Geometry` (scaled cells output) | → | `Scaled Curves` waypoint | |
-| 15 | `Scaled Curves` | → | `Boundary Surfaces.Edges` | **First** of two sources |
-| 15a | `Original Curve` | → | `Boundary Surfaces.Edges` | **Second** source — `append=True` |
-| 16 | `Boundary Surfaces.Surfaces` | → | `Extrude.Base` | Planar Brep with hole — see trick below |
-| 17 | `extrude_direction_vector` (see "Extrude direction") | → | `Extrude.Direction` | Vector whose length = thickness |
-
-That's the entire chain. ~12 components + sliders + 3 named waypoints.
-No `Surface Split`. No `Sort List`. No `List Item`. No fragment selection.
 
 ## The Boundary Surfaces trick (the key insight)
 
@@ -413,3 +402,18 @@ For 4 vertical Srf4Facade walls + 4 attractor curves in a Rhino doc:
 - **Total component count**: ~18 chain components + 6 sliders + 1 Construct
   Domain + 8 input refs + 2 Merge Multiple = ~35 total. Vs the 82 of the
   failed row-based attempt.
+
+## Stages overview (context — read AFTER the Wiring table)
+
+The PNG and the .gh both lay this out as five horizontally-grouped stages:
+
+```
+01. Base Surface & Brep   →   02. Panelization   →   03. Logic (Setting Attractor)
+                                                          ↓
+                              05. Detailing      ←   04. Construct
+                              (Adding Thickness)     (Attraction of Offsetted Curves
+                                                     → Differencing the Geometries)
+```
+
+Build in this order. Recompute at the end of stage 2, 3, and 4 to catch tree
+mismatches early.

@@ -28,26 +28,6 @@ panels.
 The renders `Kinetic (Arctic).png`, `Kinetic (Ghosted).png`, and
 `Kinetic (Close Up).png` show the resulting geometry.
 
-## The 5 stages (per author's canvas labels)
-
-```
-01. Base Surface (XZ/YZ Plane, vertical)
-        ↓
-02. Panelize + Area Filter (#<Area for second number of SmallerThan)
-        ↓
-03. Key Sliders (Protrusion / Opening Angle / Thickness)
-        ↓
-04. Faces of Base Triangle (extrude-to-point + lateral-face decomposition)
-        ↓
-05. Adding Thickness (Evaluate Surface → normal → Amplitude → Extrude)
-```
-
-The canvas has scribble labels at each stage. The "Must be #<Area"
-note on stage 2 is a **tuning hint** — the threshold slider feeding
-SmallerThan.Second Number must be set BELOW a typical panel area or
-Dispatch sends every panel into the "no-kinetic" branch and nothing
-opens. See § Sliders below for the active threshold value.
-
 ## Required: vertical wall host
 
 The canvas builds the base via `XZ Plane` → `Rectangle` → `Param_Surface`.
@@ -61,33 +41,17 @@ host face, ensure the host's outward normal is horizontal (parallel
 to the world XY plane). See `../geometry-ingest.md` § Outward-normal
 verification.
 
-## Components list (exact kinds)
+## Wiring — TRANSCRIBE THIS (the build)
 
-| Stage | Component | Kind | Notes |
-|---|---|---|---|
-| 01 | `XZ Plane` | `Component_XZPlane` | World XZ plane at origin — vertical wall facing +Y |
-| 01 | `Rectangle` | `Component_Rectangle` | Demo base. Inputs: Plane, X Size, Y Size. **For production**, swap for `Param_Brep` referenced to a Rhino host face |
-| 01 | `Surface` (param ×2) | `Param_Surface` | One forwards the rectangle into TriB; a second forwards it into the per-cell ListItem chain for the kinetic mechanism. The two-param idiom is a canvas-clarity move; both reference the same upstream rectangle |
-| 02 | `Triangle Panels B` *(LunchBox)* | `TriB` | Triangular panelization on the vertical surface |
-| 02 | `Area` | `Component_AreaProperties` | Area per panel — feeds SmallerThan as the FIRST input |
-| 02 | `Smaller Than` | `Component_SmallerThan` | Boolean filter: `First < Second` → is panel area below threshold? |
-| 02 | `Dispatch` | `Component_Dispatch` | Splits panel list into A (matches pattern = TRUE → kinetic branch) and B (FALSE → unchanged background panels) |
-| 03 | `Number Slider [Protrusion Amount]` | `GH_NumberSlider` | How far the tetrahedron apex projects out of the wall |
-| 03 | `Number Slider [Opening Angle]` | `GH_NumberSlider` | Hinge angle of each lateral face. **The kinetic state driver** — sweep from 0 (closed) → max (fully open) |
-| 03 | `Number Slider [Thickness]` | `GH_NumberSlider` | Per-face thickness along the rotated face's normal |
-| 04 | `List Item` (variable, ×5) | `Component_ListItemVariable` | Picks specific items from the panel/face/edge lists at each decomposition step |
-| 04 | `Deconstruct Brep` (×5) | `Component_DeconstructBrep` | Pulls Faces / Edges / Vertices from each Brep stage so RotateAxis can target a specific edge |
-| 04 | `Area` | `Component_AreaProperties` | **Second use** — centroid of the deconstructed face, used as the source point for the Move (the apex base) |
-| 04 | `Evaluate Surface` (×1, at stage 4) | `Component_EvaluateSurface` | Samples the base face at the centroid → returns the surface normal vector that the apex protrudes along |
-| 04 | `Multiplication` (variable) | `Component_VariableMultiplication` | `Protrusion Amount × normal vector` → motion vector |
-| 04 | `Move` | `Component_Move` | Translates the centroid by `motion` → apex point of the tetrahedron |
-| 04 | `Extrude To Point` | `Component_ExtrudeToPoint` | Extrudes the base triangle face to the apex point → tetrahedron |
-| 04 | `Rotate Axis` (×3) | `Component_RotateAxis` | Hinges each of the 3 lateral faces of the tetrahedron around its base edge by `Opening Angle` |
-| 05 | `Evaluate Surface` (×3) | `Component_EvaluateSurface` | Per-rotated-face: samples the face at a deconstructed vertex to get its current normal |
-| 05 | `Amplitude` (×3) | `Component_VectorAmplitude` | `normal × Thickness` → per-face extrude direction |
-| 05 | `Extrude` (×3, legacy) | `Component_Extrude` | Thickens each rotated face along its own normal. **Not** `Extrude Linear` |
+*(Moved to top — this is the recipe's core. Read top-to-bottom and place +
+wire components in this exact order. The Components list below disambiguates
+ambiguous kinds; Stages overview at the bottom is context only.)*
 
-## Wiring (single host, walking the chain)
+**ALL FIVE STAGES MANDATORY** — including stage 02's Area Filter (Smaller
+Than → Dispatch). Skipping the Area Filter is why kinetic panels don't
+open in past test runs: Dispatch's `Pattern` input must be wired with the
+SmallerThan boolean, or every panel routes to the non-kinetic branch and
+no triangles become tetrahedra.
 
 | # | Source | → | Target | Notes |
 |---|---|---|---|---|
@@ -147,6 +111,32 @@ verification.
 | 33 | `Amplitude [205d275d]` | → | `Extrude [7af99bda].Direction` | normal × thickness |
 | 33a | `Amplitude [33a1aacd]` | → | `Extrude [3d4f8631].Direction` | |
 | 33b | `Amplitude [f9736f97]` | → | `Extrude [9802ea66].Direction` | |
+
+## Components list (exact kinds)
+
+| Stage | Component | Kind | Notes |
+|---|---|---|---|
+| 01 | `XZ Plane` | `Component_XZPlane` | World XZ plane at origin — vertical wall facing +Y |
+| 01 | `Rectangle` | `Component_Rectangle` | Demo base. Inputs: Plane, X Size, Y Size. **For production**, swap for `Param_Brep` referenced to a Rhino host face |
+| 01 | `Surface` (param ×2) | `Param_Surface` | One forwards the rectangle into TriB; a second forwards it into the per-cell ListItem chain for the kinetic mechanism. The two-param idiom is a canvas-clarity move; both reference the same upstream rectangle |
+| 02 | `Triangle Panels B` *(LunchBox)* | `TriB` | Triangular panelization on the vertical surface |
+| 02 | `Area` | `Component_AreaProperties` | Area per panel — feeds SmallerThan as the FIRST input |
+| 02 | `Smaller Than` | `Component_SmallerThan` | Boolean filter: `First < Second` → is panel area below threshold? |
+| 02 | `Dispatch` | `Component_Dispatch` | Splits panel list into A (matches pattern = TRUE → kinetic branch) and B (FALSE → unchanged background panels) |
+| 03 | `Number Slider [Protrusion Amount]` | `GH_NumberSlider` | How far the tetrahedron apex projects out of the wall |
+| 03 | `Number Slider [Opening Angle]` | `GH_NumberSlider` | Hinge angle of each lateral face. **The kinetic state driver** — sweep from 0 (closed) → max (fully open) |
+| 03 | `Number Slider [Thickness]` | `GH_NumberSlider` | Per-face thickness along the rotated face's normal |
+| 04 | `List Item` (variable, ×5) | `Component_ListItemVariable` | Picks specific items from the panel/face/edge lists at each decomposition step |
+| 04 | `Deconstruct Brep` (×5) | `Component_DeconstructBrep` | Pulls Faces / Edges / Vertices from each Brep stage so RotateAxis can target a specific edge |
+| 04 | `Area` | `Component_AreaProperties` | **Second use** — centroid of the deconstructed face, used as the source point for the Move (the apex base) |
+| 04 | `Evaluate Surface` (×1, at stage 4) | `Component_EvaluateSurface` | Samples the base face at the centroid → returns the surface normal vector that the apex protrudes along |
+| 04 | `Multiplication` (variable) | `Component_VariableMultiplication` | `Protrusion Amount × normal vector` → motion vector |
+| 04 | `Move` | `Component_Move` | Translates the centroid by `motion` → apex point of the tetrahedron |
+| 04 | `Extrude To Point` | `Component_ExtrudeToPoint` | Extrudes the base triangle face to the apex point → tetrahedron |
+| 04 | `Rotate Axis` (×3) | `Component_RotateAxis` | Hinges each of the 3 lateral faces of the tetrahedron around its base edge by `Opening Angle` |
+| 05 | `Evaluate Surface` (×3) | `Component_EvaluateSurface` | Per-rotated-face: samples the face at a deconstructed vertex to get its current normal |
+| 05 | `Amplitude` (×3) | `Component_VectorAmplitude` | `normal × Thickness` → per-face extrude direction |
+| 05 | `Extrude` (×3, legacy) | `Component_Extrude` | Thickens each rotated face along its own normal. **Not** `Extrude Linear` |
 
 ## Sliders / defaults (as authored)
 
@@ -247,6 +237,26 @@ recipes) and are catalogued in
 purpose-built kinetic facade — favor cloning it directly when the
 prompt is "kinetic facade" or "operable panels" without further
 typology specification.
+
+## Stages overview (context — read AFTER the Wiring table)
+
+```
+01. Base Surface (XZ/YZ Plane, vertical)
+        ↓
+02. Panelize + Area Filter (#<Area for second number of SmallerThan)
+        ↓
+03. Key Sliders (Protrusion / Opening Angle / Thickness)
+        ↓
+04. Faces of Base Triangle (extrude-to-point + lateral-face decomposition)
+        ↓
+05. Adding Thickness (Evaluate Surface → normal → Amplitude → Extrude)
+```
+
+The canvas has scribble labels at each stage. The "Must be #<Area"
+note on stage 02 is a **tuning hint** — the threshold slider feeding
+SmallerThan.Second Number must be set BELOW a typical panel area or
+Dispatch sends every panel into the "no-kinetic" branch and nothing
+opens. See § Sliders above for the active threshold value.
 
 ## Cross-references
 

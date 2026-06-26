@@ -51,40 +51,11 @@ shows ~10 parallel ridges with thickness; [`Folded
 (Ghosted).png`](./Folded%20%28Ghosted%29.png) shows the wireframe with
 per-rib Y subdivisions.
 
-### A. 5-stage architecture
+### A. Wiring — TRANSCRIBE THIS (the build)
 
-```
-01. Base Rectangle ──→ 02. Rotate About One Edge ──→ 03. Mirror Across YZ Plane
-                                                              ↓
-                       05. Param_Surface + Extrude   ←──  04. Cross-Reference + 2D Series Array
-                           (along Unit Z × thickness)
-```
-
-### A. Components list (exact kinds)
-
-| Stage | Component | Kind | Notes |
-|---|---|---|---|
-| 01 | `Rectangle` | `Component_Rectangle` | Base pleat unit. Inputs: Plane (unwired → World XY), X Size, Y Size, Radius (unwired). Output: Rectangle (curve). For production builds, replace with `Param_Brep` / `Param_Surface` referenced to a Rhino GUID — see `../geometry-ingest.md` |
-| 02 | `Explode` (Curve) | `Component_ExplodeCurve` | Used twice: (i) explode the base Rectangle to extract one of its 4 edges as the rotation axis; (ii) explode the rotated + mirrored copies later to read their vertices for the X-array step |
-| 02 | `List Item` | `Component_ListItemVariable` | Pick edge index from `Explode.Segments` via the `Axis of Rotation` slider — that segment becomes the rotation axis |
-| 02 | `Rotation` slider → `Negative` → `Radians` | `OperatorSign` + `FuncToRadians` | Converts the `Rotation` slider's degrees into `−angle` in radians (negative so the fold tilts *down* before mirror flips it back up) |
-| 02 | `Rotate Axis` | `Component_RotateAxis` | Inputs: Geometry = Rectangle, Angle = `Radians`, Axis = `List Item.Item` (the picked edge). Output: rotated copy of the rectangle, tilted up |
-| 03 | `List Item` (vertices) | `Component_ListItemVariable` | Pick vertex index from `Explode.Vertices` via the `Point for Plane` slider — that vertex becomes the mirror-plane origin |
-| 03 | `YZ Plane` | `Component_YZPlane` | Builds a YZ plane at the picked vertex (mirror plane runs in YZ) |
-| 03 | `Mirror` | `Component_Mirror` | Inputs: Geometry = `Rotate Axis.Geometry`, Plane = `YZ Plane.Plane`. Output: mirrored copy → second half of the V-pair |
-| 04 | `Cross Reference` | `Component_MatchListCrossReference` | Inputs: List (A) = `Rotate Axis.Geometry`, List (B) = `Mirror.Geometry`. Output: paired streams — both halves of the V-section together. The two outputs `List (A)` and `List (B)` both flow into the same `Move.Geometry` input (multi-source) |
-| 04 | `Series` (for Y array) | `Component_Series` | Inputs: Start (unwired → 0), Step = the **Y Size** slider (same slider as `Rectangle.Y Size`), Count = `Y Count` slider. Output: series 0, Y, 2Y, … |
-| 04 | `Unit Y` | `Component_UnitVectorY` | Factor = `Series.Series` → vector list (0,0,0), (0,Y,0), (0,2Y,0), … |
-| 04 | `Move` (Y) | `Component_Move` | Inputs: Geometry = both Cross Reference outputs, Motion = `Unit Y.Unit vector`. Outputs the V-pair arrayed in Y |
-| 04 | `Explode` (vertices A) + `List Item` + `Explode` (vertices B) + `List Item` + `Distance` | `Component_ExplodeCurve` + `Component_ListItemVariable` + `Component_Distance` | The two `Point 1` sliders pick a vertex from the rotated rectangle and a vertex from the mirrored rectangle. `Distance` between them = the **pleat width** in X (one full V-section). This distance feeds the X-array `Series.Step` |
-| 04 | `Series` (for X array) | `Component_Series` | Inputs: Start (unwired → 0), Step = `Distance.Distance` (pleat width), Count = `X Count` slider |
-| 04 | `Unit X` | `Component_UnitVectorX` | Factor = `Series.Series` |
-| 04 | `Move` (X) | `Component_Move` | Inputs: Geometry = previous `Move` (Y) output, Motion = `Unit X.Unit vector`. Outputs the full 2D pleat grid as curves |
-| 05 | `Surface` | `Param_Surface` | Waypoint — receives the moved curve tree and implicitly converts curves → surfaces for the extrude |
-| 05 | `Extrude` *(legacy)* | `Component_Extrude` | Inputs: Base = `Surface` (param), Direction = `Unit Z.Unit vector`. **Not** `Extrude Linear` (which expects a Line `Axis` and has an Orientation gotcha — see `../bridge-quirks.md` § Component name traps) |
-| 05 | `Unit Z` | `Component_UnitVectorZ` | Factor = the **thickness** slider (range 0–1). Note: this is `Unit Z` because the demo Rectangle lies on World XY — see "Extrude direction" below |
-
-### A. Wiring (from canvas inspection)
+*(Moved to top — this is the recipe's core. Read top-to-bottom and place +
+wire components in this exact order. The Components list below disambiguates
+ambiguous kinds; Stages overview at the bottom is context only.)*
 
 | # | Source | → | Target | Notes |
 |---|---|---|---|---|
@@ -134,6 +105,30 @@ There are three orphan sliders on the canvas (two unnamed `Number
 Slider`s at value 1.0 and 2.0, plus the `Run` toggle and `Scenario`
 value-list which gate writes, not geometry). These are leftover from
 authoring and play no role in the chain.
+
+### A. Components list (exact kinds)
+
+| Stage | Component | Kind | Notes |
+|---|---|---|---|
+| 01 | `Rectangle` | `Component_Rectangle` | Base pleat unit. Inputs: Plane (unwired → World XY), X Size, Y Size, Radius (unwired). Output: Rectangle (curve). For production builds, replace with `Param_Brep` / `Param_Surface` referenced to a Rhino GUID — see `../geometry-ingest.md` |
+| 02 | `Explode` (Curve) | `Component_ExplodeCurve` | Used twice: (i) explode the base Rectangle to extract one of its 4 edges as the rotation axis; (ii) explode the rotated + mirrored copies later to read their vertices for the X-array step |
+| 02 | `List Item` | `Component_ListItemVariable` | Pick edge index from `Explode.Segments` via the `Axis of Rotation` slider — that segment becomes the rotation axis |
+| 02 | `Rotation` slider → `Negative` → `Radians` | `OperatorSign` + `FuncToRadians` | Converts the `Rotation` slider's degrees into `−angle` in radians (negative so the fold tilts *down* before mirror flips it back up) |
+| 02 | `Rotate Axis` | `Component_RotateAxis` | Inputs: Geometry = Rectangle, Angle = `Radians`, Axis = `List Item.Item` (the picked edge). Output: rotated copy of the rectangle, tilted up |
+| 03 | `List Item` (vertices) | `Component_ListItemVariable` | Pick vertex index from `Explode.Vertices` via the `Point for Plane` slider — that vertex becomes the mirror-plane origin |
+| 03 | `YZ Plane` | `Component_YZPlane` | Builds a YZ plane at the picked vertex (mirror plane runs in YZ) |
+| 03 | `Mirror` | `Component_Mirror` | Inputs: Geometry = `Rotate Axis.Geometry`, Plane = `YZ Plane.Plane`. Output: mirrored copy → second half of the V-pair |
+| 04 | `Cross Reference` | `Component_MatchListCrossReference` | Inputs: List (A) = `Rotate Axis.Geometry`, List (B) = `Mirror.Geometry`. Output: paired streams — both halves of the V-section together. The two outputs `List (A)` and `List (B)` both flow into the same `Move.Geometry` input (multi-source) |
+| 04 | `Series` (for Y array) | `Component_Series` | Inputs: Start (unwired → 0), Step = the **Y Size** slider (same slider as `Rectangle.Y Size`), Count = `Y Count` slider. Output: series 0, Y, 2Y, … |
+| 04 | `Unit Y` | `Component_UnitVectorY` | Factor = `Series.Series` → vector list (0,0,0), (0,Y,0), (0,2Y,0), … |
+| 04 | `Move` (Y) | `Component_Move` | Inputs: Geometry = both Cross Reference outputs, Motion = `Unit Y.Unit vector`. Outputs the V-pair arrayed in Y |
+| 04 | `Explode` (vertices A) + `List Item` + `Explode` (vertices B) + `List Item` + `Distance` | `Component_ExplodeCurve` + `Component_ListItemVariable` + `Component_Distance` | The two `Point 1` sliders pick a vertex from the rotated rectangle and a vertex from the mirrored rectangle. `Distance` between them = the **pleat width** in X (one full V-section). This distance feeds the X-array `Series.Step` |
+| 04 | `Series` (for X array) | `Component_Series` | Inputs: Start (unwired → 0), Step = `Distance.Distance` (pleat width), Count = `X Count` slider |
+| 04 | `Unit X` | `Component_UnitVectorX` | Factor = `Series.Series` |
+| 04 | `Move` (X) | `Component_Move` | Inputs: Geometry = previous `Move` (Y) output, Motion = `Unit X.Unit vector`. Outputs the full 2D pleat grid as curves |
+| 05 | `Surface` | `Param_Surface` | Waypoint — receives the moved curve tree and implicitly converts curves → surfaces for the extrude |
+| 05 | `Extrude` *(legacy)* | `Component_Extrude` | Inputs: Base = `Surface` (param), Direction = `Unit Z.Unit vector`. **Not** `Extrude Linear` (which expects a Line `Axis` and has an Orientation gotcha — see `../bridge-quirks.md` § Component name traps) |
+| 05 | `Unit Z` | `Component_UnitVectorZ` | Factor = the **thickness** slider (range 0–1). Note: this is `Unit Z` because the demo Rectangle lies on World XY — see "Extrude direction" below |
 
 ### A. Sliders / defaults (as authored)
 
@@ -213,6 +208,15 @@ faces, the `Explode` → edge-pick stage still works (gives you the host's
 edge curves), but the fold geometry will be skewed if the host isn't a
 true rectangle.
 
+### A. Stages overview (context — read AFTER the Wiring table)
+
+```
+01. Base Rectangle ──→ 02. Rotate About One Edge ──→ 03. Mirror Across YZ Plane
+                                                              ↓
+                       05. Param_Surface + Extrude   ←──  04. Cross-Reference + 2D Series Array
+                           (along Unit Z × thickness)
+```
+
 ---
 
 ## Variant B — Origami Faceted (pyramidal-pinnacle field, attractor-driven)
@@ -232,48 +236,11 @@ This variant **does** use a panelizer (`Quad Panels A`) and **does** use
 an attractor field (`Populate Geometry` + `Pull Point`) — making it
 closer to perforated-attractor in spirit than to Variant A.
 
-### B. 5-stage architecture
+### B. Wiring — TRANSCRIBE THIS (the build)
 
-```
-01. Base Rectangle ──→ 02. Quad Panelize ──→ 03. Per-Cell Polyline + Centroid
-                                                          ↓
-                                              04. Attractor Field → Remap → per-cell scale + per-cell height
-                                                          ↓
-                                              05. Per-cell pyramid (Boundary Surfaces + Extrude To Point)
-```
-
-### B. Components list (exact kinds)
-
-| Stage | Component | Kind | Notes |
-|---|---|---|---|
-| 01 | `Rectangle` | `Component_Rectangle` | Base host. X Size, Y Size = two sliders. For production, replace with `Param_Brep` → `Deconstruct Brep` → face — see `../geometry-ingest.md` |
-| 01 | `Surface` | `Param_Surface` | Implicit Curve→Surface waypoint — feeds the host into Quad Panels and Populate Geometry |
-| 02 | `Quad Panels` *(LunchBox)* | `QuadA` | Inputs: Surface, U Divisions, V Divisions (both wired to the **same** slider — joint UV). Output: Panels (tree of quad cells, one branch per cell). Per skill author's note 5, swap for any other LunchBox panel component without touching downstream (see "Panelizer interchangeability" below) |
-| 03 | `Deconstruct Brep` | `Component_DeconstructBrep` | Extracts Edges from each quad cell |
-| 03 | `Point On Curve` | `Component_CurvePointAt` | Parameter unwired (defaults t=0) — extracts the start point of each cell edge. Together these reconstruct the cell's 4 corner points |
-| 03 | `PolyLine` | `Component_Polyline` | Inputs: Vertices = the per-cell corner points. Output: one **closed polyline per cell** — the stable curve we'll scale, centroid, and base the pyramid on |
-| 03 | `Area` (×3) | `Component_AreaProperties` | (a) on the cell polyline → centroid as `Scale.Center` and `Pull Point.Point`; (b) on the offset surface → centroid for the normal-vector trick; (c) on the scaled polyline → centroid as the apex-move base |
-| 04 | `Populate Geometry` | `Component_PopulateGeometry` | Inputs: Geometry = host `Surface`, Count = `Amount of Attractor Points` slider. Output: N random points on the host = the **attractor cloud** |
-| 04 | `Pull Point` | `Component_PullPoint` | Inputs: Point = cell centroid, Geometry = attractor cloud (`access: list` — natively handles the multi-point case). Output: Distance from each cell centroid to the nearest attractor point |
-| 04 | `Sort List` → `Reverse List` → `List Item`(index=0) → `Division` | `Component_SortList`, `Component_ReverseList`, `Component_ListItemVariable`, `Operator_Division` | Builds the dynamic clamp cap: sort distances ascending → reverse → first item = max distance → divide by a slider (val=2) → that's the cap fed into `Minimum.B`. Effectively `cap = max_distance / cap_divisor` |
-| 04 | `Minimum` | `Operator_Minimum` | Clamp: `min(per-cell distance, cap)` — keeps far-away cells from squashing the gradient. **Like perforated-attractor's `Minimum` clamp**, but here the cap is derived from the data rather than a free slider |
-| 04 | `Bounds` | `Component_NumericBounds` | Reads the clamped-distance range to feed `Remap Numbers.Source` |
-| 04 | `Construct Domain` | `Component_ConstructDomain` | Inputs: Domain start = scale-min slider (val=0.1), Domain end = scale-max slider (val=0.9). Note: **forward** order here (start < end) — closer to attractor → smaller distance → smaller scale factor → smaller inset cell. This is the opposite of perforated-attractor's reversed-domain convention |
-| 04 | `Remap Numbers` | `Component_RemapNumbers` | Maps clamped per-cell distance into the (0.1, 0.9) scale-factor domain |
-| 04 | `Scale` | `Component_Scale` | **Uniform scale**, NOT `Scale NU`. Inputs: Geometry = cell polyline, Center = `Area.Centroid` (same cell), Factor = `Remap Numbers.Mapped`. Output: per-cell **inset polyline** sized by attractor proximity |
-| 05 | `Discontinuity` | `Component_CurveDiscontinuity` | Extracts corner points of the scaled inner polyline |
-| 05 | `End Points` | `Component_EndPoints` | On the original cell edges → start + end of each edge |
-| 05 | `Line` (×2) | `Component_Line` | Builds the per-edge fan: Line A from `End Points.End` → `Discontinuity.Points`; Line B from `End Points.Start` → `Discontinuity.Points`. These connect outer cell vertices to inner scaled corners |
-| 05 | `Join Curves` | `Component_JoinCurves` | Joins the two Line streams into the per-cell facet skeleton |
-| 05 | `Boundary Surfaces` | `Component_BoundarySurfaces` | Builds planar surfaces from the joined curve skeleton — produces the **cell base face(s)** to be extruded to the apex |
-| 05 | `Offset Surface` | `Component_OffsetSurface` | Inputs: Surface = `Scale.Geometry` (the scaled polyline, implicitly converted to a surface), Distance = a slider (val=0.2). Used **only** to obtain a point displaced perpendicular to the host plane — the offset distance becomes the source vector for the per-cell normal |
-| 05 | `Vector 2Pt` | `Component_Vector2Pt` | Inputs: Point A = `Area(Offset Surface).Centroid`, Point B = `Area(Scale).Centroid`. Output: vector B − A = the host normal vector, of length = `Offset Distance`. This is a **homemade host-normal extractor** — same role as `Evaluate Surface → Frame → Z-Axis` in `../extrude-direction.md` Pattern B |
-| 05 | `Multiplication` | `Component_VariableMultiplication` | Inputs: A = `Remap Numbers.Mapped` (the per-cell scale factor, reused as a per-cell height multiplier!), B = `Height of Peaks` slider. Output: per-cell apex height |
-| 05 | `Amplitude` | `Component_VectorAmplitude` | Inputs: Vector = `Vector 2Pt.Vector` (normal), Amplitude = `Multiplication.Result`. Output: per-cell apex offset vector |
-| 05 | `Move` | `Component_Move` | Inputs: Geometry = `Area(Scale).Centroid` (the cell's inset centroid), Motion = `Amplitude.Vector`. Output: per-cell **apex point** — the centroid pushed up by `Remap × HeightOfPeaks` |
-| 05 | `Extrude Point` *(Extrude To Point)* | `Component_ExtrudeToPoint` | Inputs: Base = `Boundary Surfaces.Surfaces` (cell base face(s)), Point = `Move.Geometry` (apex). Output: per-cell **pyramid**. This is **not** the legacy `Extrude` taking a vector — it's the "extrude to a single 3D point" variant that produces the pyramidal apex collapse |
-
-### B. Wiring (from canvas inspection)
+*(Moved to top — this is the recipe's core. Read top-to-bottom and place +
+wire components in this exact order. The Components list below disambiguates
+ambiguous kinds; Stages overview at the bottom is context only.)*
 
 | # | Source | → | Target | Notes |
 |---|---|---|---|---|
@@ -334,6 +301,37 @@ closer to perforated-attractor in spirit than to Variant A.
 There are two orphan sliders on the canvas (unnamed `Number Slider`s at
 1.0 and 2.0), plus the `Run` toggle and `Scenario` value-list which gate
 writes, not geometry.
+
+### B. Components list (exact kinds)
+
+| Stage | Component | Kind | Notes |
+|---|---|---|---|
+| 01 | `Rectangle` | `Component_Rectangle` | Base host. X Size, Y Size = two sliders. For production, replace with `Param_Brep` → `Deconstruct Brep` → face — see `../geometry-ingest.md` |
+| 01 | `Surface` | `Param_Surface` | Implicit Curve→Surface waypoint — feeds the host into Quad Panels and Populate Geometry |
+| 02 | `Quad Panels` *(LunchBox)* | `QuadA` | Inputs: Surface, U Divisions, V Divisions (both wired to the **same** slider — joint UV). Output: Panels (tree of quad cells, one branch per cell). Per skill author's note 5, swap for any other LunchBox panel component without touching downstream (see "Panelizer interchangeability" below) |
+| 03 | `Deconstruct Brep` | `Component_DeconstructBrep` | Extracts Edges from each quad cell |
+| 03 | `Point On Curve` | `Component_CurvePointAt` | Parameter unwired (defaults t=0) — extracts the start point of each cell edge. Together these reconstruct the cell's 4 corner points |
+| 03 | `PolyLine` | `Component_Polyline` | Inputs: Vertices = the per-cell corner points. Output: one **closed polyline per cell** — the stable curve we'll scale, centroid, and base the pyramid on |
+| 03 | `Area` (×3) | `Component_AreaProperties` | (a) on the cell polyline → centroid as `Scale.Center` and `Pull Point.Point`; (b) on the offset surface → centroid for the normal-vector trick; (c) on the scaled polyline → centroid as the apex-move base |
+| 04 | `Populate Geometry` | `Component_PopulateGeometry` | Inputs: Geometry = host `Surface`, Count = `Amount of Attractor Points` slider. Output: N random points on the host = the **attractor cloud** |
+| 04 | `Pull Point` | `Component_PullPoint` | Inputs: Point = cell centroid, Geometry = attractor cloud (`access: list` — natively handles the multi-point case). Output: Distance from each cell centroid to the nearest attractor point |
+| 04 | `Sort List` → `Reverse List` → `List Item`(index=0) → `Division` | `Component_SortList`, `Component_ReverseList`, `Component_ListItemVariable`, `Operator_Division` | Builds the dynamic clamp cap: sort distances ascending → reverse → first item = max distance → divide by a slider (val=2) → that's the cap fed into `Minimum.B`. Effectively `cap = max_distance / cap_divisor` |
+| 04 | `Minimum` | `Operator_Minimum` | Clamp: `min(per-cell distance, cap)` — keeps far-away cells from squashing the gradient. **Like perforated-attractor's `Minimum` clamp**, but here the cap is derived from the data rather than a free slider |
+| 04 | `Bounds` | `Component_NumericBounds` | Reads the clamped-distance range to feed `Remap Numbers.Source` |
+| 04 | `Construct Domain` | `Component_ConstructDomain` | Inputs: Domain start = scale-min slider (val=0.1), Domain end = scale-max slider (val=0.9). Note: **forward** order here (start < end) — closer to attractor → smaller distance → smaller scale factor → smaller inset cell. This is the opposite of perforated-attractor's reversed-domain convention |
+| 04 | `Remap Numbers` | `Component_RemapNumbers` | Maps clamped per-cell distance into the (0.1, 0.9) scale-factor domain |
+| 04 | `Scale` | `Component_Scale` | **Uniform scale**, NOT `Scale NU`. Inputs: Geometry = cell polyline, Center = `Area.Centroid` (same cell), Factor = `Remap Numbers.Mapped`. Output: per-cell **inset polyline** sized by attractor proximity |
+| 05 | `Discontinuity` | `Component_CurveDiscontinuity` | Extracts corner points of the scaled inner polyline |
+| 05 | `End Points` | `Component_EndPoints` | On the original cell edges → start + end of each edge |
+| 05 | `Line` (×2) | `Component_Line` | Builds the per-edge fan: Line A from `End Points.End` → `Discontinuity.Points`; Line B from `End Points.Start` → `Discontinuity.Points`. These connect outer cell vertices to inner scaled corners |
+| 05 | `Join Curves` | `Component_JoinCurves` | Joins the two Line streams into the per-cell facet skeleton |
+| 05 | `Boundary Surfaces` | `Component_BoundarySurfaces` | Builds planar surfaces from the joined curve skeleton — produces the **cell base face(s)** to be extruded to the apex |
+| 05 | `Offset Surface` | `Component_OffsetSurface` | Inputs: Surface = `Scale.Geometry` (the scaled polyline, implicitly converted to a surface), Distance = a slider (val=0.2). Used **only** to obtain a point displaced perpendicular to the host plane — the offset distance becomes the source vector for the per-cell normal |
+| 05 | `Vector 2Pt` | `Component_Vector2Pt` | Inputs: Point A = `Area(Offset Surface).Centroid`, Point B = `Area(Scale).Centroid`. Output: vector B − A = the host normal vector, of length = `Offset Distance`. This is a **homemade host-normal extractor** — same role as `Evaluate Surface → Frame → Z-Axis` in `../extrude-direction.md` Pattern B |
+| 05 | `Multiplication` | `Component_VariableMultiplication` | Inputs: A = `Remap Numbers.Mapped` (the per-cell scale factor, reused as a per-cell height multiplier!), B = `Height of Peaks` slider. Output: per-cell apex height |
+| 05 | `Amplitude` | `Component_VectorAmplitude` | Inputs: Vector = `Vector 2Pt.Vector` (normal), Amplitude = `Multiplication.Result`. Output: per-cell apex offset vector |
+| 05 | `Move` | `Component_Move` | Inputs: Geometry = `Area(Scale).Centroid` (the cell's inset centroid), Motion = `Amplitude.Vector`. Output: per-cell **apex point** — the centroid pushed up by `Remap × HeightOfPeaks` |
+| 05 | `Extrude Point` *(Extrude To Point)* | `Component_ExtrudeToPoint` | Inputs: Base = `Boundary Surfaces.Surfaces` (cell base face(s)), Point = `Move.Geometry` (apex). Output: per-cell **pyramid**. This is **not** the legacy `Extrude` taking a vector — it's the "extrude to a single 3D point" variant that produces the pyramidal apex collapse |
 
 ### B. Sliders / defaults (as authored)
 
@@ -431,6 +429,16 @@ Polyline → Area → Scale → Extrude To Point) is tree-aware.
 
 See `../perforated-attractor/recipe.md` § Multi-surface batching for
 the full pattern.
+
+### B. Stages overview (context — read AFTER the Wiring table)
+
+```
+01. Base Rectangle ──→ 02. Quad Panelize ──→ 03. Per-Cell Polyline + Centroid
+                                                          ↓
+                                              04. Attractor Field → Remap → per-cell scale + per-cell height
+                                                          ↓
+                                              05. Per-cell pyramid (Boundary Surfaces + Extrude To Point)
+```
 
 ---
 

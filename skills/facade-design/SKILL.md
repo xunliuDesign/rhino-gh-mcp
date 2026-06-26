@@ -138,6 +138,32 @@ Hold these in mind before every step:
 Specific patterns that have wrecked past test runs — recognize them in
 your own draft plan and reroute to the recipe before any tool call:
 
+- **Stage 01's `Rectangle → Param_Surface` is FROM-SCRATCH only.**
+  Every recipe shows `Rectangle → Param_Surface` as stage 01 because the
+  `Rectangle` and `Param_Surface` components exist to **create** a host
+  surface when none is available in Rhino. **Only build this chain when
+  there is no host in the doc and the prompt doesn't reference one.**
+  
+  If the user's prompt references "this surface", "my building", "the
+  selected face", "this layer", or there's an obvious host already in
+  the Rhino doc, **use the corresponding GH parameter component and set
+  its existing geometry — do NOT write a Python script** to fetch breps
+  via `Rhino.RhinoDoc.ActiveDoc.Objects` or similar. The native param
+  components handle host ingest natively and stay legible on the canvas:
+  - Single host by GUID → `Param_Brep` (or `Param_Surface`) — set its
+    persistent data to the host's GUID (right-click → "Set one Brep" /
+    "Set one Surface", or set internal GUID directly)
+  - Hosts on a named layer → `Geometry Pipeline` — set the Filter
+    parameter to the layer name (e.g. `Louvers`, `Kinetic`)
+  - Multi-host (N discrete GUIDs) → N × `Param_Brep` refs (each with one
+    GUID set) → `Merge Multiple` → downstream
+  - Bounding curve only → `Curve` param (set existing curve) →
+    `Param_Surface` (implicit Curve→Surface conversion)
+  
+  Everything from stage 02 onward stays identical — the recipes are
+  host-agnostic past stage 01. **Writing a Python script to fetch host
+  geometry is the wrong move and no recipe in this skill requires it.**
+  See `reference/geometry-ingest.md` for the full substitution patterns.
 - **"Strategy: each system gets a Python 3 Script that reads breps by
   layer…"** — Stop. This is the defining failure mode. Every typology
   has a graph recipe under `reference/<typology>/recipe.md`; the recipe's

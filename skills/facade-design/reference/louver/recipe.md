@@ -50,38 +50,16 @@ see `../extrude-direction.md`.
 
 ## Variant A — Basic
 
-### 5 stages
+> **Build order:** read the Wiring table below first — it's the transcribable
+> build. Components list is the kind-lookup for everything wired. Sliders are
+> defaults to set. Anti-patterns are must-not-do callouts. The 5-stage overview
+> at the bottom is context only.
 
-```
-01. Base Surface (Rectangle → Param_Surface)
-        ↓
-02. Strip Subdivision (Divide Domain² → Isotrim, U=N, V=1)
-        ↓
-03. Per-Strip Rotation Axis (Evaluate Surface + Unit Y + Line SDL)
-        ↓
-04. Per-Strip Rotation (Degree → Radians → Rotate Axis)
-        ↓
-05. Thickness Extrude (Amplitude(normal, thickness) → Extrude)
-```
+### Wiring — TRANSCRIBE THIS (the build)
 
-### Components list (exact kinds)
-
-| Stage | Component | Kind | Why this one |
-|---|---|---|---|
-| 01 | `Rectangle` | `Component_Rectangle` | Generates the demo base curve on a plane. Inputs: Plane (unwired → WorldXY), X Size, Y Size, Radius. Output: Rectangle (curve), Length. For production, replace with a Rhino-host `Param_Brep` / `Param_Surface` ref — see `../geometry-ingest.md` |
-| 01 | `Surface` (param) | `Param_Surface` | Implicit Curve→Surface converter — accepts the Rectangle curve and emits a planar Surface for the panelizer. Replaces `Boundary Surfaces` |
-| 02 | `Divide Domain²` | `Component_Divide2DInterval` | Subdivides the surface's 2D parameter domain into segments. Inputs: Domain (from Param_Surface), U Count, V Count. Output: Segments (list of 2D sub-domains) |
-| 02 | `Isotrim` | `Component_IsoTrim` | Extracts each sub-domain as its own sub-surface. Inputs: Surface (here nicknamed "Feed OG surface" — the original Param_Surface), Domain (list from Divide Domain²). Output: list of strip surfaces |
-| 03 | `Evaluate Surface` | `Component_EvaluateSurface` | Samples a point + frame + normal on each strip at a UV location. Inputs: Surface (Isotrim output), Point (MD Slider UV). Outputs used: Point (axis start), Normal (extrude direction source) |
-| 03 | `MD Slider` | `GH_MultiDimensionalSlider` | 2D slider authored over [0,1]² — picks the UV location at which Evaluate Surface samples each strip. In the canvas it sits near (0.5, 0.5) — the strip's parametric midpoint |
-| 03 | `Unit Y` | `Component_UnitVectorY` | World Y unit vector — the direction the rotation-axis line runs. Factor unwired (=1.0). Strips run along Y on this WorldXY host, so the axis is each strip's long-axis |
-| 03 | `Line SDL` | `Component_LineSDL` | Start-Direction-Length line. Inputs: Start (Evaluate Surface.Point), Direction (Unit Y vector), Length (slider). Output: Line — the per-strip rotation axis |
-| 04 | `Radians` | `FuncToRadians` | Converts the Degree slider to radians (Rotate Axis.Angle expects radians) |
-| 04 | `Rotate Axis` | `Component_RotateAxis` | Rotates each strip surface about its own per-strip line axis. Inputs: Geometry (Isotrim.Surface), Angle (radians), Axis (Line) |
-| 05 | `Amplitude` | `Component_VectorAmplitude` | Scales the strip's normal by the Thickness slider. Inputs: Vector (Evaluate Surface.Normal), Amplitude (Thickness slider) |
-| 05 | `Extrude` *(legacy)* | `Component_Extrude` | Thickens each rotated strip. Inputs: Base (Rotate Axis.Geometry), Direction (Amplitude.Vector). **Not** `Extrude Linear` — see `../bridge-quirks.md` § Component name traps |
-
-### Wiring (from canvas inspection)
+*(Moved from below — this is the recipe's core. Read top-to-bottom and place
++ wire components in this exact order. The Components list below disambiguates
+any kind that's ambiguous; the Sliders table provides default values.)*
 
 | # | Source | → | Target | Notes |
 |---|---|---|---|---|
@@ -108,6 +86,23 @@ see `../extrude-direction.md`.
 | 18 | `Thickness` slider (value=0.115, range 0–1, float 3dp) | → | `Amplitude.Amplitude` | Scales the per-strip normal |
 | 19 | `Amplitude.Vector` | → | `Extrude.Direction` | Extrude vector = strip-normal × Thickness |
 
+### Components list (exact kinds)
+
+| Stage | Component | Kind | Why this one |
+|---|---|---|---|
+| 01 | `Rectangle` | `Component_Rectangle` | Generates the demo base curve on a plane. Inputs: Plane (unwired → WorldXY), X Size, Y Size, Radius. Output: Rectangle (curve), Length. For production, replace with a Rhino-host `Param_Brep` / `Param_Surface` ref — see `../geometry-ingest.md` |
+| 01 | `Surface` (param) | `Param_Surface` | Implicit Curve→Surface converter — accepts the Rectangle curve and emits a planar Surface for the panelizer. Replaces `Boundary Surfaces` |
+| 02 | `Divide Domain²` | `Component_Divide2DInterval` | Subdivides the surface's 2D parameter domain into segments. Inputs: Domain (from Param_Surface), U Count, V Count. Output: Segments (list of 2D sub-domains) |
+| 02 | `Isotrim` | `Component_IsoTrim` | Extracts each sub-domain as its own sub-surface. Inputs: Surface (here nicknamed "Feed OG surface" — the original Param_Surface), Domain (list from Divide Domain²). Output: list of strip surfaces |
+| 03 | `Evaluate Surface` | `Component_EvaluateSurface` | Samples a point + frame + normal on each strip at a UV location. Inputs: Surface (Isotrim output), Point (MD Slider UV). Outputs used: Point (axis start), Normal (extrude direction source) |
+| 03 | `MD Slider` | `GH_MultiDimensionalSlider` | 2D slider authored over [0,1]² — picks the UV location at which Evaluate Surface samples each strip. In the canvas it sits near (0.5, 0.5) — the strip's parametric midpoint |
+| 03 | `Unit Y` | `Component_UnitVectorY` | World Y unit vector — the direction the rotation-axis line runs. Factor unwired (=1.0). Strips run along Y on this WorldXY host, so the axis is each strip's long-axis |
+| 03 | `Line SDL` | `Component_LineSDL` | Start-Direction-Length line. Inputs: Start (Evaluate Surface.Point), Direction (Unit Y vector), Length (slider). Output: Line — the per-strip rotation axis |
+| 04 | `Radians` | `FuncToRadians` | Converts the Degree slider to radians (Rotate Axis.Angle expects radians) |
+| 04 | `Rotate Axis` | `Component_RotateAxis` | Rotates each strip surface about its own per-strip line axis. Inputs: Geometry (Isotrim.Surface), Angle (radians), Axis (Line) |
+| 05 | `Amplitude` | `Component_VectorAmplitude` | Scales the strip's normal by the Thickness slider. Inputs: Vector (Evaluate Surface.Normal), Amplitude (Thickness slider) |
+| 05 | `Extrude` *(legacy)* | `Component_Extrude` | Thickens each rotated strip. Inputs: Base (Rotate Axis.Geometry), Direction (Amplitude.Vector). **Not** `Extrude Linear` — see `../bridge-quirks.md` § Component name traps |
+
 ### Sliders / defaults (as authored)
 
 | Slider | Value | Min | Max | Type | Drives | Notes |
@@ -130,50 +125,31 @@ see `../extrude-direction.md`.
 | Setting `V Count` ≥ 2 with `Rotate Axis` along Y | Each U×V sub-strip rotates about a Y-line through its own UV midpoint — adjacent cells overlap | Keep `V Count = 1` for horizontal slats / vertical fins. For per-cell rotated panels, switch to the `kinetic-panel` recipe |
 | `Extrude Linear` taking a vector | Wrong port type — `Extrude Linear.Axis` expects a `Line`, not a `Vector` | Use legacy `Extrude` (`Component_Extrude`, nickname `"Extr"`) which takes `Vector` on `Direction` directly. See `../bridge-quirks.md` § Component name traps |
 
+### Stages overview (context — read AFTER the Wiring table)
+
+```
+01. Base Surface (Rectangle → Param_Surface)
+        ↓
+02. Strip Subdivision (Divide Domain² → Isotrim, U=N, V=1)
+        ↓
+03. Per-Strip Rotation Axis (Evaluate Surface + Unit Y + Line SDL)
+        ↓
+04. Per-Strip Rotation (Degree → Radians → Rotate Axis)
+        ↓
+05. Thickness Extrude (Amplitude(normal, thickness) → Extrude)
+```
+
 ---
 
 ## Variant B — Wavy
 
-### 5 stages
+> **Build order:** read the Wiring tables below first — they're the
+> transcribable build (two halves: stage 01 dense, stages 02–05 linear).
+> Components list is the kind-lookup. Sliders are defaults to set.
+> Anti-patterns are must-not-do callouts. The 5-stage overview at the
+> bottom is context only.
 
-```
-01. Procedural Wavy Base (two columns of jittered points → Interpolate → Loft)
-        ↓
-02. Contour into Strips (Unit X × distance)
-        ↓
-03. Project to Flat Plane (XZ Plane → Project)
-        ↓
-04. Loft Pairs — Wavy → Flat (Loft #2 over [Projected, Original])
-        ↓
-05. Thickness Extrude (Unit X × thickness)
-```
-
-### Components list (exact kinds)
-
-| Stage | Component | Kind | Why this one |
-|---|---|---|---|
-| 01 | `Construct Point` | `Component_ConstructPoint` | Origin (X=Y=Z unwired = 0,0,0). The seed for both columns of control points |
-| 01 | `Series` | `Component_Series` | Generates a list of evenly-spaced numbers (Start unwired = 0, Step = slider, Count = slider). Feeds Unit Z.Factor → vertical heights |
-| 01 | `Unit Z` | `Component_UnitVectorZ` | World Z × Series → list of vertical offset vectors |
-| 01 | `Move` #1 | `Component_Move` | Origin point moved by each Z offset → column of `count` points stacked in Z |
-| 01 | `Unit X` *(of three on canvas)* | `Component_UnitVectorX` | World X × column-offset slider → vector shifting the second column away from the first along X |
-| 01 | `Move` #2 | `Component_Move` | Column #1's points moved by Unit X → column #2 (parallel, shifted in X) |
-| 01 | `List Length` | `Component_ListLength` | Reads the per-column point count (multi-source input gives per-branch length = `count`). Drives Random.Number and Split List.Index |
-| 01 | `Random` | `Component_Random` | Generates `count` random numbers in [0, 1] (Range unwired) — one Y-jitter value per point in each column. Seed slider for reproducibility |
-| 01 | `Unit Y` | `Component_UnitVectorY` | World Y × Random → list of Y-jitter vectors |
-| 01 | `Move` #3 | `Component_Move` | (Column #1 + Column #2) points moved by Y-jitter → 2N randomly perturbed points |
-| 01 | `Split List` | `Component_SplitList` | Splits the 2N perturbed points at index = `count` → List A (column 1 jittered), List B (column 2 jittered) |
-| 01 | `Interpolate (t)` ×2 | `Component_InterpCurveWithTangents` | Two interpolated curves, one through each split list — the wavy edges of the base surface |
-| 01 | `Loft` #1 | `Component_LoftSurface` | Lofts the two interp curves → the wavy base Brep |
-| 02 | `Unit X` *(second of three)* | `Component_UnitVectorX` | World X × 1.0 (Factor unwired) — the contour-plane normal direction. Stays constant; not a slider |
-| 02 | `Contour` | `Component_Contour1` | Slices the wavy Brep with parallel planes perpendicular to Unit X, spaced by `contour_dist` slider. Outputs a tree of curves — one per slice |
-| 03 | `XZ Plane` | `Component_XZPlane` | World XZ plane positioned at the origin point — the destination plane for projection |
-| 03 | `Project` | `Component_Project` | Projects each contour curve onto the XZ plane (along plane's normal = Y). Produces flat copies of every wavy slice |
-| 04 | `Loft` #2 | `Component_LoftSurface` | Curves input takes **both** the projected (flat) curves and the original contour (wavy) curves as a merged list. Lofts each pair → a louver strip that transitions wavy→flat |
-| 05 | `Unit X` *(third of three)* | `Component_UnitVectorX` | World X × `thickness` slider — extrusion vector (host-normal, since the lofted strips face X) |
-| 05 | `Extrude` *(legacy)* | `Component_Extrude` | Thickens each lofted strip along X. Inputs: Base (Loft #2.Loft), Direction (Unit X × thickness) |
-
-### Wiring (from canvas inspection)
+### Wiring — TRANSCRIBE THIS (the build)
 
 Read in two halves — stage 01 (procedural base) is dense; stages 02–05 are linear.
 
@@ -224,6 +200,31 @@ Read in two halves — stage 01 (procedural base) is dense; stages 02–05 are l
 | 28 | `Thickness` slider (value=0.1, range 0–1, float) | → | `Unit X #2.Factor` | Extrusion magnitude |
 | 29 | `Unit X #2.Unit vector` | → | `Extrude.Direction` | Extrude along +X by `thickness` |
 
+### Components list (exact kinds)
+
+| Stage | Component | Kind | Why this one |
+|---|---|---|---|
+| 01 | `Construct Point` | `Component_ConstructPoint` | Origin (X=Y=Z unwired = 0,0,0). The seed for both columns of control points |
+| 01 | `Series` | `Component_Series` | Generates a list of evenly-spaced numbers (Start unwired = 0, Step = slider, Count = slider). Feeds Unit Z.Factor → vertical heights |
+| 01 | `Unit Z` | `Component_UnitVectorZ` | World Z × Series → list of vertical offset vectors |
+| 01 | `Move` #1 | `Component_Move` | Origin point moved by each Z offset → column of `count` points stacked in Z |
+| 01 | `Unit X` *(of three on canvas)* | `Component_UnitVectorX` | World X × column-offset slider → vector shifting the second column away from the first along X |
+| 01 | `Move` #2 | `Component_Move` | Column #1's points moved by Unit X → column #2 (parallel, shifted in X) |
+| 01 | `List Length` | `Component_ListLength` | Reads the per-column point count (multi-source input gives per-branch length = `count`). Drives Random.Number and Split List.Index |
+| 01 | `Random` | `Component_Random` | Generates `count` random numbers in [0, 1] (Range unwired) — one Y-jitter value per point in each column. Seed slider for reproducibility |
+| 01 | `Unit Y` | `Component_UnitVectorY` | World Y × Random → list of Y-jitter vectors |
+| 01 | `Move` #3 | `Component_Move` | (Column #1 + Column #2) points moved by Y-jitter → 2N randomly perturbed points |
+| 01 | `Split List` | `Component_SplitList` | Splits the 2N perturbed points at index = `count` → List A (column 1 jittered), List B (column 2 jittered) |
+| 01 | `Interpolate (t)` ×2 | `Component_InterpCurveWithTangents` | Two interpolated curves, one through each split list — the wavy edges of the base surface |
+| 01 | `Loft` #1 | `Component_LoftSurface` | Lofts the two interp curves → the wavy base Brep |
+| 02 | `Unit X` *(second of three)* | `Component_UnitVectorX` | World X × 1.0 (Factor unwired) — the contour-plane normal direction. Stays constant; not a slider |
+| 02 | `Contour` | `Component_Contour1` | Slices the wavy Brep with parallel planes perpendicular to Unit X, spaced by `contour_dist` slider. Outputs a tree of curves — one per slice |
+| 03 | `XZ Plane` | `Component_XZPlane` | World XZ plane positioned at the origin point — the destination plane for projection |
+| 03 | `Project` | `Component_Project` | Projects each contour curve onto the XZ plane (along plane's normal = Y). Produces flat copies of every wavy slice |
+| 04 | `Loft` #2 | `Component_LoftSurface` | Curves input takes **both** the projected (flat) curves and the original contour (wavy) curves as a merged list. Lofts each pair → a louver strip that transitions wavy→flat |
+| 05 | `Unit X` *(third of three)* | `Component_UnitVectorX` | World X × `thickness` slider — extrusion vector (host-normal, since the lofted strips face X) |
+| 05 | `Extrude` *(legacy)* | `Component_Extrude` | Thickens each lofted strip along X. Inputs: Base (Loft #2.Loft), Direction (Unit X × thickness) |
+
 ### Sliders / defaults (as authored)
 
 | Slider | Value | Min | Max | Type | Drives | Notes |
@@ -249,6 +250,20 @@ For larger waves, wire a `Construct Domain(0, jitter_max_slider)` into
 | `Project` plane normal NOT aligned with `Contour.Direction` | The flat copies wouldn't sit in the plane of each contour — the loft pairs would twist | Both must use the same axis: `Contour.Direction = Unit X` AND `XZ Plane` (normal = Y); the projection is *along* Y onto the XZ plane, which preserves each contour's X position and flattens Y → planar copies of the wavy slices |
 | Splitting at a hardcoded index instead of `List Length` | Locks the split to a specific count; changing the `Count` slider breaks the chain | Wire `List Length.Length` (per-branch) into `Split List.Index` so the split tracks `Series.Count` automatically |
 | Wiring `Random.Random` into `Move.Motion` directly | `Move.Motion` is a `Vector` input; Random outputs `Number` | Route through `Unit Y(Factor=Random)` to convert random scalars into Y-vectors before feeding `Move` |
+
+### Stages overview (context — read AFTER the Wiring table)
+
+```
+01. Procedural Wavy Base (two columns of jittered points → Interpolate → Loft)
+        ↓
+02. Contour into Strips (Unit X × distance)
+        ↓
+03. Project to Flat Plane (XZ Plane → Project)
+        ↓
+04. Loft Pairs — Wavy → Flat (Loft #2 over [Projected, Original])
+        ↓
+05. Thickness Extrude (Unit X × thickness)
+```
 
 ---
 

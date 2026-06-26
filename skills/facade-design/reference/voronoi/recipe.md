@@ -61,42 +61,10 @@ offset distance is constant; only cell *shape* varies).
 
 ## Variant A — Regular Voronoi (cells clipped to host)
 
-### The 5 stages
+### Wiring — TRANSCRIBE THIS (Variant A)
 
-```
-01. Rectangle (host) ──→ 02. Populate 3D (seeds) ──→ 03. Planar Voronoi (with Boundary)
-        │                                                  │
-        └──→ Brep Edges → Join Curves ──→ Voronoi.Boundary │
-                                                           ↓
-                                                      Cells (closed curves, clipped)
-                                                           ↓
-                       04. Per-cell offset → two-stream Boundary Surfaces (cell + offset)
-                                                           ↓
-                                              05. Extrude (Unit Z × depth)
-```
-
-### Components (exact kinds)
-
-| Stage | Component | GUID (Variant A) | Kind | Notes |
-|---|---|---|---|---|
-| 01 | `Rectangle` | `56a1e66b` | `Component_Rectangle` | Demo host. Replace with `Param_Brep` / `Param_Surface` for production |
-| 01 | `Surface` (param) | `48823fc4` | `Param_Surface` | Implicit Curve → Surface (same idiom as panelized recipe) |
-| 01 | `Brep Edges` | `249c2e40` | `Component_BRepEdges` | `.Naked` output = the rectangle's four edges as a list |
-| 01 | `Join Curves` | `72d936fe` | `Component_JoinCurves` | Joins the four edges into one closed curve → feeds `Voronoi.Boundary` |
-| 02 | `Populate 3D` | `3e96e6e4` | `Component_PopulateBox` | Random point seeding inside the surface's bounding region. **Item access; no density weighting** — the SKILL's graded-density variant requires the script-escalation override |
-| 03 | `Planar Voronoi` | `bb1ff5a9` | `Component_PlanarVoronoi` | Native Voronoi on the seed points, clipped to `Boundary`. **`.Cells` = closed planar curves, one per seed point.** Cells whose natural Voronoi polygon extended past the boundary get *clipped* — their boundary segment becomes straight along the rectangle edge |
-| 03 | `Curve` (waypoint) | `e7be8903` | `Param_Curve` | Named waypoint — `Voronoi.Cells` direct passthrough |
-| 04 | `Offset Curve Loose` | `17e35845` | `Component_OffsetCurveLoose` | Offsets each cell curve inward by `Distance`. **`Loose` variant** (not `Offset Curve`) because cell curves are polylines — loose offset handles polyline corners without producing arc fillets |
-| 04 | `Boundary Surfaces` (offset → surfaces) | `74e81a23` | `Component_BoundarySurfaces` | Converts the offset curves to planar Breps — used as the *inner* shape source via the sort/pick step |
-| 04 | `Area` | `724f7b8a` | `Component_AreaProperties` | Reads area of each offset Brep — used as the sort key |
-| 04 | `Sort List` | `d982b8b5` | `Component_SortList` | Per-branch sort of the offset Breps by area |
-| 04 | `List Item` | `b388baa2` | `Component_ListItemVariable` | Per-branch `i=0` pick — selects the single inner Brep per cell (handles degenerate self-intersecting offsets that would otherwise produce multiple sub-surfaces) |
-| 04 | `Curve` (waypoint) | `cba042cd` | `Param_Curve` | Named waypoint — the picked inner Brep, fed as second edge stream into the cell-and-hole Boundary Surfaces |
-| 04 | `Boundary Surfaces` (cell + hole) | `c57a920b` | `Component_BoundarySurfaces` | **The differencing step.** Takes the original cell curve + the picked inner Brep as nested closed inputs → emits a planar Brep with a hole (same "Boundary Surfaces trick" as perforated-attractor) |
-| 05 | `Unit Z` | `47ec4c69` | `Component_UnitVectorZ` | Extrude direction = (0,0,1) × Factor |
-| 05 | `Extrude` (legacy) | `d1643d6c` | `Component_Extrude` | Legacy `Component_Extrude` taking a `Vector` directly. **NOT** `Extrude Linear` — see [`../bridge-quirks.md`](../bridge-quirks.md) § Component name traps |
-
-### Wiring (Variant A)
+*(Moved to top — this is the recipe's core. Components list below is the
+kind-lookup. Stages overview at the bottom is context only.)*
 
 | # | Source | → | Target | Notes |
 |---|---|---|---|---|
@@ -124,6 +92,27 @@ offset distance is constant; only cell *shape* varies).
 | 22 | `Depth_A` slider `ddb5eefc` (=0.5, range 0–1, float) | → | `Unit Z 47ec4c69.Factor` | Thickness |
 | 23 | `Unit Z 47ec4c69.Unit vector` | → | `Extrude d1643d6c.Direction` | (0,0,1) × 0.5 |
 
+### Components (exact kinds)
+
+| Stage | Component | GUID (Variant A) | Kind | Notes |
+|---|---|---|---|---|
+| 01 | `Rectangle` | `56a1e66b` | `Component_Rectangle` | Demo host. Replace with `Param_Brep` / `Param_Surface` for production |
+| 01 | `Surface` (param) | `48823fc4` | `Param_Surface` | Implicit Curve → Surface (same idiom as panelized recipe) |
+| 01 | `Brep Edges` | `249c2e40` | `Component_BRepEdges` | `.Naked` output = the rectangle's four edges as a list |
+| 01 | `Join Curves` | `72d936fe` | `Component_JoinCurves` | Joins the four edges into one closed curve → feeds `Voronoi.Boundary` |
+| 02 | `Populate 3D` | `3e96e6e4` | `Component_PopulateBox` | Random point seeding inside the surface's bounding region. **Item access; no density weighting** — the SKILL's graded-density variant requires the script-escalation override |
+| 03 | `Planar Voronoi` | `bb1ff5a9` | `Component_PlanarVoronoi` | Native Voronoi on the seed points, clipped to `Boundary`. **`.Cells` = closed planar curves, one per seed point.** Cells whose natural Voronoi polygon extended past the boundary get *clipped* — their boundary segment becomes straight along the rectangle edge |
+| 03 | `Curve` (waypoint) | `e7be8903` | `Param_Curve` | Named waypoint — `Voronoi.Cells` direct passthrough |
+| 04 | `Offset Curve Loose` | `17e35845` | `Component_OffsetCurveLoose` | Offsets each cell curve inward by `Distance`. **`Loose` variant** (not `Offset Curve`) because cell curves are polylines — loose offset handles polyline corners without producing arc fillets |
+| 04 | `Boundary Surfaces` (offset → surfaces) | `74e81a23` | `Component_BoundarySurfaces` | Converts the offset curves to planar Breps — used as the *inner* shape source via the sort/pick step |
+| 04 | `Area` | `724f7b8a` | `Component_AreaProperties` | Reads area of each offset Brep — used as the sort key |
+| 04 | `Sort List` | `d982b8b5` | `Component_SortList` | Per-branch sort of the offset Breps by area |
+| 04 | `List Item` | `b388baa2` | `Component_ListItemVariable` | Per-branch `i=0` pick — selects the single inner Brep per cell (handles degenerate self-intersecting offsets that would otherwise produce multiple sub-surfaces) |
+| 04 | `Curve` (waypoint) | `cba042cd` | `Param_Curve` | Named waypoint — the picked inner Brep, fed as second edge stream into the cell-and-hole Boundary Surfaces |
+| 04 | `Boundary Surfaces` (cell + hole) | `c57a920b` | `Component_BoundarySurfaces` | **The differencing step.** Takes the original cell curve + the picked inner Brep as nested closed inputs → emits a planar Brep with a hole (same "Boundary Surfaces trick" as perforated-attractor) |
+| 05 | `Unit Z` | `47ec4c69` | `Component_UnitVectorZ` | Extrude direction = (0,0,1) × Factor |
+| 05 | `Extrude` (legacy) | `d1643d6c` | `Component_Extrude` | Legacy `Component_Extrude` taking a `Vector` directly. **NOT** `Extrude Linear` — see [`../bridge-quirks.md`](../bridge-quirks.md) § Component name traps |
+
 ### Sliders (Variant A, as authored)
 
 | Slider | GUID | Value | Min | Max | Type | Drives |
@@ -133,6 +122,20 @@ offset distance is constant; only cell *shape* varies).
 | `Cell Amount` | `7a828230` | 30 | 0 | 110 | int | `Populate 3D 3e96e6e4.Count` |
 | `Offset distance` | `6d26aacb` | 0.158 | 0 | 1 | float | `Offset Curve Loose 17e35845.Distance` |
 | `Extrude depth` | `ddb5eefc` | 0.5 | 0 | 1 | float | `Unit Z 47ec4c69.Factor` |
+
+### Stages overview (Variant A — context, read AFTER Wiring)
+
+```
+01. Rectangle (host) ──→ 02. Populate 3D (seeds) ──→ 03. Planar Voronoi (with Boundary)
+        │                                                  │
+        └──→ Brep Edges → Join Curves ──→ Voronoi.Boundary │
+                                                           ↓
+                                                      Cells (closed curves, clipped)
+                                                           ↓
+                       04. Per-cell offset → two-stream Boundary Surfaces (cell + offset)
+                                                           ↓
+                                              05. Extrude (Unit Z × depth)
+```
 
 ## Variant B — Free-Edge Voronoi (interior cells only, ragged silhouette)
 
@@ -184,6 +187,26 @@ those interior cells — ragged, organic, no rectangular outline. This
 is the "free-edge" reading: each kept cell's *every* edge is a free
 Voronoi edge, not a clipped one.
 
+### Wiring — TRANSCRIBE THIS (Variant B — only differences from A)
+
+Wires 1–9 (Rectangle → Surface → Brep Edges/Populate → Join Curves →
+PlanarVoronoi) are structurally identical to Variant A, just on the B
+instances. The new wires (the divergence diagram above shows the same
+information graphically):
+
+| # | Source | → | Target | Notes |
+|---|---|---|---|---|
+| 10a | `Planar Voronoi 1269eb46.Cells` | → | `Curve | Curve ee1d92e7.Curve B` | Cell curves as test set |
+| 10b | `Join Curves 1c909a7c.Curves` | → | `Curve | Curve ee1d92e7.Curve A` | Rectangle boundary as reference |
+| 10c | `Planar Voronoi 1269eb46.Cells` | → | `Dispatch 2715c7a0.List` | Cells as dispatch payload |
+| 10d | `Curve | Curve ee1d92e7.Points` | → | `List Length 99e2662b.List` | Intersection points per cell |
+| 10e | `List Length 99e2662b.Length` | → | `Dispatch 2715c7a0.Dispatch pattern` | Pattern: 0 → List B, ≥1 → List A |
+| 10f | `Dispatch 2715c7a0.List B` | → | `Curve` waypoint `5dbe0971` | **Interior cells only** continue into Stage 04 |
+| 10g | `Dispatch 2715c7a0.List A` | → | *(unwired — boundary cells discarded)* | |
+
+From wire 11 onward (Curve waypoint → Offset → Boundary Surfaces → Extrude),
+Variant B mirrors Variant A's wiring 11–23 on its own component instances.
+
 ### Components (Variant B)
 
 Same kinds as Variant A, separate instances. Only the three filter
@@ -210,25 +233,6 @@ components are unique to Variant B:
 | 04 | `Boundary Surfaces` (cell + hole) | `9ad8159a` | `Component_BoundarySurfaces` | |
 | 05 | `Unit Z` | `a701bb8e` | `Component_UnitVectorZ` | |
 | 05 | `Extrude` | `3b447175` | `Component_Extrude` | |
-
-### Wiring (Variant B — only differences from A)
-
-Wires 1–9 (Rectangle → Surface → Brep Edges/Populate → Join Curves →
-PlanarVoronoi) are structurally identical to Variant A, just on the B
-instances. The new wires:
-
-| # | Source | → | Target | Notes |
-|---|---|---|---|---|
-| 10a | `Planar Voronoi 1269eb46.Cells` | → | `Curve | Curve ee1d92e7.Curve B` | Cell curves as test set |
-| 10b | `Join Curves 1c909a7c.Curves` | → | `Curve | Curve ee1d92e7.Curve A` | Rectangle boundary as reference |
-| 10c | `Planar Voronoi 1269eb46.Cells` | → | `Dispatch 2715c7a0.List` | Cells as dispatch payload |
-| 10d | `Curve | Curve ee1d92e7.Points` | → | `List Length 99e2662b.List` | Intersection points per cell |
-| 10e | `List Length 99e2662b.Length` | → | `Dispatch 2715c7a0.Dispatch pattern` | Pattern: 0 → List B, ≥1 → List A |
-| 10f | `Dispatch 2715c7a0.List B` | → | `Curve` waypoint `5dbe0971` | **Interior cells only** continue into Stage 04 |
-| 10g | `Dispatch 2715c7a0.List A` | → | *(unwired — boundary cells discarded)* | |
-
-From wire 11 onward (Curve waypoint → Offset → Boundary Surfaces → Extrude),
-Variant B mirrors Variant A's wiring 11–23 on its own component instances.
 
 ### Sliders (Variant B, as authored)
 

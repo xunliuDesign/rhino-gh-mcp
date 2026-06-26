@@ -28,8 +28,10 @@ a structural-frame recipe if you need it.
 ## How to build (clone-and-tune)
 
 1. **Open the perforated-attractor canvas** and follow
-   [`../perforated-attractor/recipe.md`](../perforated-attractor/recipe.md)
-   stages 01–05 exactly.
+   [`../perforated-attractor/recipe.md`](../perforated-attractor/recipe.md) —
+   transcribe its **Wiring table** (the first section after "What it builds")
+   exactly. The components, ports, and tree handling are unchanged for
+   diagrid; only the slider values differ.
 2. **Panelizer**: use `Triangle Panels B` (`TriB`) for the structural
    triangulated read. Quad / hex / diamond also work — each produces a
    different lattice (quad = curtain-wall grid, hex = honeycomb frame).

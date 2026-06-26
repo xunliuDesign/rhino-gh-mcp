@@ -45,31 +45,11 @@ another without touching anything downstream.
 The downstream chain (extrude, optional inset) is identical across
 variants — only stage 02's panelizer swaps.
 
-## The 3 stages (minimal panelize-and-extrude)
+## Wiring — TRANSCRIBE THIS (the build)
 
-```
-01. Base Surface (Rectangle → Param_Surface)
-        ↓
-02. Panelize (Triangle Panels C)
-        ↓
-03. Extrude (along Unit Z × Factor)
-```
-
-This is the **minimal** chain. For a joint-reveal variant (per-panel
-inset producing visible mullion lines), see § "Variant: panelized with
-joint reveal" below.
-
-## Components list (exact kinds)
-
-| Stage | Component | Kind | Why this one |
-|---|---|---|---|
-| 01 | `Rectangle` | `Component_Rectangle` | Generates the demo base curve on a plane. Inputs: Plane, X Size, Y Size, Radius. Output: Rectangle (curve), Length. **For production builds**, replace with `Param_Brep` / `Param_Surface` referenced to a Rhino GUID — see `../geometry-ingest.md` |
-| 01 | `Surface` (param) | `Param_Surface` | Acts as **implicit Curve→Surface converter** — accepts the Rectangle curve and emits a planar Surface for the panelizer. Replaces what would otherwise be a `Boundary Surfaces` component |
-| 02 | `Triangle Panels C` *(LunchBox)* | `TriC` | Triangular panelization. Inputs: Surface, U Divisions, V Divisions. Output: Panels (panel system). Requires LunchBox installed and `ComponentScope = all` (or LunchBox added to `CategoryFilter`) |
-| 03 | `Unit Z` | `Component_UnitVectorZ` | Extrude direction = (0,0,1) × Factor. **Factor input is unwired in this canvas** — defaults to 1.0. See "Extrude direction" below for the host-normal generalization |
-| 03 | `Extrude` *(legacy)* | `Component_Extrude` | Inputs: Base (geometry), Direction (vector). **Not** `Extrude Linear` (which takes a Line axis and has an Orientation gotcha — see `../bridge-quirks.md` § Component name traps) |
-
-## Wiring (from canvas inspection)
+*(Moved to top — this is the recipe's core. Read top-to-bottom and place +
+wire components in this exact order. The Components list below disambiguates
+ambiguous kinds; Stages overview at the bottom is context only.)*
 
 | # | Source | → | Target | Notes |
 |---|---|---|---|---|
@@ -83,6 +63,16 @@ joint reveal" below.
 | 8 | `Triangle Panels C.Panels` | → | `Extrude.Base` | Tree of triangular panel surfaces |
 | 9 | `Unit Z.Unit vector` | → | `Extrude.Direction` | Vector × Factor = (0,0,1) × 1.0 |
 | 10 | (Unit Z.Factor unwired) | → | (defaults to 1.0) | **No thickness slider in this canvas** |
+
+## Components list (exact kinds)
+
+| Stage | Component | Kind | Why this one |
+|---|---|---|---|
+| 01 | `Rectangle` | `Component_Rectangle` | Generates the demo base curve on a plane. Inputs: Plane, X Size, Y Size, Radius. Output: Rectangle (curve), Length. **For production builds**, replace with `Param_Brep` / `Param_Surface` referenced to a Rhino GUID — see `../geometry-ingest.md` |
+| 01 | `Surface` (param) | `Param_Surface` | Acts as **implicit Curve→Surface converter** — accepts the Rectangle curve and emits a planar Surface for the panelizer. Replaces what would otherwise be a `Boundary Surfaces` component |
+| 02 | `Triangle Panels C` *(LunchBox)* | `TriC` | Triangular panelization. Inputs: Surface, U Divisions, V Divisions. Output: Panels (panel system). Requires LunchBox installed and `ComponentScope = all` (or LunchBox added to `CategoryFilter`) |
+| 03 | `Unit Z` | `Component_UnitVectorZ` | Extrude direction = (0,0,1) × Factor. **Factor input is unwired in this canvas** — defaults to 1.0. See "Extrude direction" below for the host-normal generalization |
+| 03 | `Extrude` *(legacy)* | `Component_Extrude` | Inputs: Base (geometry), Direction (vector). **Not** `Extrude Linear` (which takes a Line axis and has an Orientation gotcha — see `../bridge-quirks.md` § Component name traps) |
 
 ## Sliders / defaults (as authored)
 
@@ -217,6 +207,20 @@ via Brep CP's longest-list iteration.
 See `../perforated-attractor/recipe.md` § Multi-surface batching for
 the full pattern — identical here, just replace the Scale/Boundary
 Surfaces stages with a direct TriC → Extrude.
+
+## Stages overview (context — read AFTER the Wiring table)
+
+```
+01. Base Surface (Rectangle → Param_Surface)
+        ↓
+02. Panelize (Triangle Panels C)
+        ↓
+03. Extrude (along Unit Z × Factor)
+```
+
+This is the **minimal** chain. For a joint-reveal variant (per-panel
+inset producing visible mullion lines), see § "Variant: panelized with
+joint reveal" above.
 
 ## Cross-references
 
