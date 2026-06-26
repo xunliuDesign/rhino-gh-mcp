@@ -36,6 +36,7 @@ copy the bundle into the client's skills directory.
 
 | Skill | Scope | Description |
 |-------|-------|-------------|
+| [rhino-gh-bridge-basics](./rhino-gh-bridge-basics/) | defaults | Prerequisite knowledge for every rhino-gh-mcp session — the five fundamentals of Grasshopper modeling (geometry hierarchy, data flow, modifiers, data trees, execution state + baking), data-type casting rules, Null-result troubleshooting, debugging components, and the full bridge-specific quirks list (name traps, persistent-data limits, Scenario gating). Pair with a task skill for the actual recipe. |
 | [landform](./landform/) | curated (`MCP` category) | Build a parametric landform / terrain definition using the bundled MCP landscape user-objects. |
 | [ladybug-environmental](./ladybug-environmental/) | curated (`Ladybug` category) | Set up environmental analysis on a Rhino site model using the Ladybug Tools components (sun path, sun hours, wind rose). Requires Ladybug Tools to be installed in Rhino. |
 | [facade-design](./facade-design/) | defaults (`Surface, Curve, Vector, Transform, Mesh, Maths, Sets, Params`) | Generate parametric building facades from simple prompts — from scratch, onto existing Rhino host geometry, or by tiling a premade module — across multiple typologies (louver, perforated, diagrid, tessellation, panelized, folded), with sensible defaults and tunable sliders. |
