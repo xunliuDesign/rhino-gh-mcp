@@ -67,11 +67,28 @@ user. The deliverable is a *family* of facades: a graph with labelled
 sliders the user can drag, not a single frozen shape. Geometry is the
 byproduct; the legible parametric definition is the product.
 
-This skill is the **orchestration layer** for facade work. The companion
-`parametric-facade` skill (in this same repo, under
-`../parametric-facade/`) is a deeper vocabulary reference — when a
-typology needs more than what's encoded in `reference/typologies.md`,
-reach for the matching file in `../parametric-facade/references/`.
+This skill is the **orchestration layer** for facade work. Every typology
+in this skill has a transcribed recipe under `reference/<typology>/recipe.md` —
+a full wiring table with exact components, ports, slider defaults, and
+anti-patterns. The recipe IS the build.
+
+## The first move on every facade prompt
+
+**Open `reference/<typology>/recipe.md` end-to-end before you place a single
+component.** The recipe's Components list and Wiring table are the authoring
+contract you transcribe onto the canvas. Skipping straight to "I'll write a
+Python script that does this" is the single biggest failure mode of this
+skill. If your opening move is drafting a `gh_write_script_py3` call, stop —
+you have not yet looked at the recipe, and the recipe almost certainly
+handles it natively.
+
+This applies *especially* when the prompt sounds custom. "Smooth random
+curvature", "wavy", "evenly spaced", "attractor-driven", "responsive",
+"organic" — all of these map to existing graph recipes. **Read first,
+decide approach second, build third.** No exceptions.
+
+If you cannot find a matching recipe for the prompt's typology, then and only
+then walk the 4-tier routing in "Routing — which build approach" below.
 
 ## Operating principles
 
@@ -84,15 +101,23 @@ Hold these in mind before every step:
 2. **Recognize context before authoring.** Cheap preflight reads before any
    write — bridge status, canvas summary, scene + units. Never derive a
    "scale" or a "host" from assumptions when one tool call answers it.
-3. **Graph by default; escalate only when topology demands it.** Prefer
-   placing and wiring native (or LunchBox) components — the visible graph is
-   the point, since users learn the parametric logic by reading the canvas.
-   Reach for `gh_write_script_py3` only when the topology genuinely can't be
-   expressed legibly in components (Voronoi / Delaunay / image-driven
-   fields, or pulling objects via RhinoCommon). A large surface or panel
-   count is **not** an escalation trigger — batch it as one data-tree graph
-   (see "Multiple hosts → ONE graph"). When you must script, isolate it as
-   one node with typed parameters and keep the rest graph-based.
+3. **Graph by default; script is a narrow escape hatch.** Every recipe in
+   this skill is graph-based — native and LunchBox components are the build.
+   Reach for `gh_write_script_py3` only when ALL of these are true:
+   (a) the typology has no recipe in this skill, AND
+   (b) it falls into one of: Voronoi/Delaunay with > 50 sites where graph
+       nodes flood the canvas, image-driven attractor fields, or
+       RhinoCommon-only operations (e.g. `Mesh.CreateFromBrep`), AND
+   (c) you have already read the recipes for the closest typologies and
+       confirmed they don't cover the requested behavior.
+   Phrases like "smooth random", "evenly spaced", "wavy", "attractor",
+   "responsive", "organic" are **NOT** script triggers — every one of them
+   is covered by a graph recipe (Variant B Wavy in louver covers "smooth
+   random curvature"; the Random → Unit Y(Factor=Random) → Move chain
+   handles jitter; etc.). A large surface or panel count is **not** an
+   escalation trigger either — batch it as one data-tree graph (see
+   "Multiple hosts → ONE graph"). When you must script, isolate it as one
+   node with typed parameters and keep the rest graph-based.
 4. **Verify before reporting.** Recompute, scan runtime messages on the
    nodes you touched, scale-sanity check, capture viewport. Fixing on
    detection is part of the skill — silent green is not enough.
@@ -107,6 +132,65 @@ Hold these in mind before every step:
    cause of wrong, inefficient, non-idiomatic builds. If a recipe step names
    `Scale NU` and `Surface Split`, use those — not `Polygon`, not invented
    substitutes. When in doubt, follow the file over your own instinct.
+
+## Common improvisation traps
+
+Specific patterns that have wrecked past test runs — recognize them in
+your own draft plan and reroute to the recipe before any tool call:
+
+- **"Strategy: each system gets a Python 3 Script that reads breps by
+  layer…"** — Stop. This is the defining failure mode. Every typology
+  has a graph recipe under `reference/<typology>/recipe.md`; the recipe's
+  stage 01 covers host ingest (via `Geometry Pipeline` filtered by layer,
+  or `Param_Brep` GUID refs). Open the recipe and follow it instead.
+- **Hand-rolling random jitter as math expressions** (UV-based hash,
+  Expression with custom seed inputs, Partition List into trees by hand).
+  When the recipe says "Random → Unit Y(Factor=Random) → Move", do that —
+  it's tree-aligned by construction.
+- **Switching to RhinoCommon (`rhino_execute_code`) to read host geometry
+  when the recipe already documents host ingest natively.** See
+  `reference/geometry-ingest.md` for the canonical patterns
+  (Geometry Pipeline, Param_Brep N-ref + Merge Multiple).
+- **Building from "first principles" because the prompt sounds bespoke.**
+  "Smooth random curvature, evenly spaced" sounds like a custom problem —
+  it is exactly Variant B Wavy in `reference/louver/recipe.md`, with
+  Series + Random control points + Interpolate + Loft + Contour. Recipe
+  before invention.
+- **Improvising past a "the skill flags this" gotcha** (OBSOLETE Move,
+  multi-GUID Brep, Expression input types). If you find yourself
+  workarounding bridge-quirks one by one, you have started building from
+  scratch instead of cloning a verified recipe. The recipe's component
+  list is pre-vetted against every quirk in `reference/bridge-quirks.md`.
+- **Adding components AFTER the thickening step to "fix" facade behavior.**
+  Every recipe in this skill terminates at a **thickening step** that
+  converts flat geometry into volume — typically `Extrude` (legacy
+  `Component_Extrude` taking a `Vector`), or `Extrude To Point`
+  (`Component_ExtrudeToPoint`) for pyramidal forms like folded
+  Variant B. **The thickening step is always the last step in the
+  recipe.** No component appears downstream of it in any recipe. If the
+  facade doesn't behave correctly — kinetic panels don't open, perforated
+  holes are zero-sized, louvers tilt the wrong way, panels overlap,
+  voronoi cells don't seat — the bug is **upstream** of the thickening
+  step, in the rotation, scale, attractor, panelizer, or driver-slider
+  wiring. Never bolt on Boolean Difference, Split Brep, Cap Holes, Solid
+  Union, Fillet Edge, or any other downstream component to patch the
+  result. The recovery move is to retrace the recipe's wiring table from
+  stage 01, find where your build diverged, and correct that step — not
+  add patches past the thickening step.
+- **Building only some stages of the recipe.** Every recipe has 3-5
+  numbered stages (e.g. kinetic: 01 Base Surface → 02 Panelize + Area
+  Filter → 03 Key Sliders → 04 Faces of Base Triangle → 05 Adding
+  Thickness). **All stages are mandatory.** Skipping stage 02 because
+  "Area Filter" sounds optional, or jumping straight from stage 01 to
+  stage 05, produces a broken facade — in kinetic, missing the area
+  filter is why panels don't open. Before placing any component, list
+  every numbered stage from the recipe in your plan as a checklist.
+  Execute them in order. Mark each complete before moving on. Do not
+  merge, reorder, or skip stages.
+
+If you catch yourself in any of these patterns, the recovery move is the
+same: stop tool calls, open `reference/<typology>/recipe.md`, and restart
+the build from the recipe's stage 01.
 
 ## Simple-prompt intent resolution — read this first
 
@@ -147,8 +231,16 @@ For every prompt, walk this chain in order:
    architecture the first time. Ranges respect the doc unit system: read
    `length_units` from `rhino_get_scene_info` and pick the row of the
    defaults table that matches (mm vs m vs ft).
-4. **Build. Then report.** Do not propose, do not ask "should I…". Build.
-   Recompute. Capture. Then surface the sliders the user can drag.
+4. **Open the recipe.** Now load `reference/<typology>/recipe.md` end-to-end.
+   Read the Components list and Wiring table fully *before placing your first
+   component*. The recipe is not a hint — it is the build. If the recipe has
+   multiple variants (e.g. louver Variant A vs B), pick the one whose
+   generator matches the prompt's intent (e.g. "smooth random curvature" →
+   Variant B Wavy).
+5. **Build. Then report.** Do not propose, do not ask "should I…". Build by
+   transcribing the recipe's wiring table — same components, same ports,
+   same tree handling. Recompute. Capture. Then surface the sliders the
+   user can drag.
 
 ### Concrete worked example
 
