@@ -1021,14 +1021,53 @@ namespace RhinoGhMcp
                 {
                     var doc = GetGHDocument();
                     var obj = doc.FindObject(new Guid(guid), false) as IGH_Component;
-                    if (obj == null || !obj.GetType().GetProperty("Code")?.CanWrite == true)
+                    if (obj == null)
                     {
-                        result = new JObject { ["status"] = "error", ["result"] = "Not a script component." };
+                        result = new JObject { ["status"] = "error", ["result"] = "Component not found." };
                         return;
                     }
+
+                    // Resolve where the script source lives across component generations:
+                    //   - Rhino 6/7 GhPython:          public writable string property "Code".
+                    //   - Rhino 8 Python3/IronPython2: RhinoCodePlatform.GH.IScriptComponent.Text,
+                    //     an EXPLICIT interface implementation -> invisible to GetProperty("Code")
+                    //     or GetProperty("Text"); it must be reached through the interface map.
+                    // The old code only looked for "Code", so on Rhino 8 GetProperty("Code")
+                    // returned null and SetValue null-ref'd ("Object reference not set...").
+                    var codeProp = obj.GetType().GetProperty("Code");
+                    bool hasLegacyCode = codeProp != null && codeProp.CanWrite;
+                    PropertyInfo textProp = null;
+                    if (!hasLegacyCode)
+                    {
+                        var scriptIface = obj.GetType().GetInterface("IScriptComponent");
+                        if (scriptIface != null) textProp = scriptIface.GetProperty("Text");
+                    }
+
+                    if (!hasLegacyCode && (textProp == null || !textProp.CanWrite))
+                    {
+                        result = new JObject { ["status"] = "error", ["result"] = "Not a script component (no writable Code or IScriptComponent.Text)." };
+                        return;
+                    }
+
                     if (paramDefs != null) { /* param update logic omitted for brevity */ }
-                    if (code != null) obj.GetType().GetProperty("Code").SetValue(obj, code, null);
-                    if (desc != null) obj.Description = desc;
+
+                    if (code != null)
+                    {
+                        if (hasLegacyCode) codeProp.SetValue(obj, code, null);
+                        else textProp.SetValue(obj, code, null);
+                    }
+
+                    if (desc != null)
+                    {
+                        try { obj.Description = desc; }
+                        catch
+                        {
+                            var descProp = obj.GetType().GetInterface("IScriptComponent")?.GetProperty("Description");
+                            if (descProp != null && descProp.CanWrite) descProp.SetValue(obj, desc, null);
+                        }
+                    }
+
+                    obj.ExpireSolution(true);
                     result = new JObject { ["status"] = "success", ["result"] = "Script updated." };
                 }
                 catch (Exception ex)
